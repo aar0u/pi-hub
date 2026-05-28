@@ -33,19 +33,31 @@ function renderMarkdown(text, container) {
 }
 
 const $ = (id) => document.getElementById(id);
-const state = { scope: "current", data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true };
+const BACKEND_OFFLINE_MESSAGE = "Backend disconnected. Restart it, then refresh if this does not recover.";
+const state = { scope: "current", data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false };
+
+function isNetworkError(err) {
+  return err instanceof TypeError || (err instanceof DOMException && err.name === "AbortError");
+}
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { "content-type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+  } catch (err) {
+    if (isNetworkError(err)) throw new Error(BACKEND_OFFLINE_MESSAGE);
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error) throw new Error(data.error || res.statusText);
   return data;
 }
 
 const STREAM_AWARENESS_TIMEOUT_MS = 45_000;
+const BACKEND_CHECK_INTERVAL_MS = 5_000;
 
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -334,6 +346,23 @@ function errorMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
+function markBackendOffline() {
+  state.backendOffline = true;
+  $("status").classList.add("backend-offline");
+  $("status").textContent = BACKEND_OFFLINE_MESSAGE;
+}
+
+async function checkBackend() {
+  if (state.streaming) return;
+  try {
+    const data = await api("/api/state");
+    if (state.backendOffline) updateChrome(data);
+    state.backendOffline = false;
+  } catch (err) {
+    markBackendOffline();
+  }
+}
+
 async function runAction(action) {
   try {
     await action();
@@ -396,6 +425,7 @@ function updateChrome(data) {
   state.data = data;
   $("cwd").value = data.cwd || "";
   const { name, parent } = formatSessionPath(data.sessionFile);
+  $("status").classList.remove("backend-offline");
   $("status").textContent = parent ? `${parent}/${name}` : name || "new session";
 }
 
@@ -570,9 +600,11 @@ async function sendPrompt(text) {
     }
   } catch (err) {
     assistant.el.classList.add("error");
+    const disconnected = !state.abortRequested && isNetworkError(err);
     assistant.body.textContent = timedOut
       ? `No visible response after ${Math.round(STREAM_AWARENESS_TIMEOUT_MS / 1000)}s; request aborted.`
-      : (state.abortRequested ? "Request aborted." : (err instanceof DOMException && err.name === "AbortError" ? "Connection closed before a response was received." : errorMessage(err)));
+      : (state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err)));
+    if (disconnected) markBackendOffline();
   } finally {
     clearTimeout(timeout);
     clearInterval(progressInterval);
@@ -580,7 +612,7 @@ async function sendPrompt(text) {
     state.abortController = null;
     state.abortRequested = false;
     setStreamingUi(false);
-    if (!timedOut) await syncStateWithoutRerender();
+    if (!timedOut) await syncStateWithoutRerender().catch(() => markBackendOffline());
   }
 }
 
@@ -617,5 +649,7 @@ $("cwdForm").onsubmit = (ev) => {
 $("newSession").onclick = () => void runAction(async () => { renderState(await api("/api/sessions/new", { method: "POST" })); await loadSessions(); focusPrompt(); });
 $("currentScope").onclick = () => void runAction(async () => { state.scope = "current"; $("currentScope").classList.add("active"); $("allScope").classList.remove("active"); await loadSessions(); });
 $("allScope").onclick = () => void runAction(async () => { state.scope = "all"; $("allScope").classList.add("active"); $("currentScope").classList.remove("active"); await loadSessions(); });
+
+setInterval(() => void checkBackend(), BACKEND_CHECK_INTERVAL_MS);
 
 refresh().then(focusPrompt).catch((err) => { $("status").textContent = errorMessage(err); focusPrompt(); });
