@@ -1,3 +1,22 @@
+function renderMarkdown(text, container) {
+  let last = 0;
+  const re = /```(\w*)\n([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) container.append(new Text(text.slice(last, m.index)));
+    const pre = document.createElement("pre");
+    pre.className = "code-block";
+    const code = document.createElement("code");
+    code.textContent = m[2];
+    if (m[1]) code.className = `language-${m[1]}`;
+    if (window.hljs) hljs.highlightElement(code);
+    pre.append(code);
+    container.append(pre);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) container.append(new Text(text.slice(last)));
+}
+
 const $ = (id) => document.getElementById(id);
 const state = { scope: "current", data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true };
 
@@ -188,7 +207,7 @@ function addAssistantTurn(messages, opts = {}) {
     if (part.type === "text") {
       const section = document.createElement("div");
       section.className = "turn-text";
-      section.textContent = part.text;
+      renderMarkdown(part.text, section);
       body.append(section);
       continue;
     }
@@ -256,7 +275,7 @@ function addMessage(m, opts = {}) {
   }
   const body = document.createElement("div");
   body.className = "msg-body";
-  body.textContent = messageText(m);
+  renderMarkdown(messageText(m), body);
   if (opts.pending) {
     const p = document.createElement("span");
     p.className = "pending";

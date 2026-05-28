@@ -52,3 +52,5 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; height: 1
 #prompt { resize: vertical; max-height: 40vh; min-height: 48px; }
 #send { min-width: 44px; width: 44px; height: 42px; }
 .small { font-size: 11px; color: #84796c; }
+.code-block { margin: 8px 0; padding: 10px; background: #f6f3ed; border: 1px solid #e0d8cc; border-radius: 6px; overflow-x: auto; }
+.code-block code { font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.4; }
