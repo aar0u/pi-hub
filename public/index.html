@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pi web</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-enter" viewBox="0 0 24 24"><path d="M20 4v7a4 4 0 0 1-4 4H5"/><path d="m9 11-4 4 4 4"/></symbol>
+    <symbol id="icon-send" viewBox="0 0 24 24"><path d="m4 4 16 8-16 8 3-8-3-8Z"/><path d="M7 12h13"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="icon-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="icon-rewind" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></symbol>
+    <symbol id="icon-fork" viewBox="0 0 24 24"><path d="M7 4v6a5 5 0 0 0 5 5h5"/><path d="M17 9v10"/><circle cx="7" cy="4" r="2"/><circle cx="17" cy="9" r="2"/><circle cx="17" cy="19" r="2"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></symbol>
+  </svg>
+  <aside class="sidebar">
+    <header>
+      <strong>π web</strong>
+      <button id="newSession" class="icon-button" title="New session" aria-label="New session"><svg class="icon"><use href="#icon-plus"></use></svg></button>
+    </header>
+    <form id="cwdForm" class="cwd-row">
+      <input id="cwd" spellcheck="false" placeholder="working directory" />
+      <button class="icon-button" title="Switch directory" aria-label="Switch directory"><svg class="icon"><use href="#icon-enter"></use></svg></button>
+    </form>
+    <div class="session-tools">
+      <button id="currentScope" class="active">Current</button>
+      <button id="allScope">All</button>
+    </div>
+    <div id="sessions" class="sessions"></div>
+  </aside>
+
+  <main>
+    <div id="status" class="status"></div>
+    <section id="chat" class="chat"></section>
+    <form id="promptForm" class="composer">
+      <textarea id="prompt" rows="3" placeholder="Request… Enter sends, Shift+Enter newline"></textarea>
+      <button id="send" class="icon-button" title="Send" aria-label="Send"><svg class="icon"><use href="#icon-send"></use></svg></button>
+    </form>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
