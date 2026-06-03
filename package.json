@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.mjs",
-    "build": "node --check src/*.mjs public/*.js",
+    "build": "node --check src/*.mjs src/routes/*.mjs public/*.js",
     "start": "node src/server.mjs"
   },
   "dependencies": {

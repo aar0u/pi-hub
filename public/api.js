@@ -1,3 +1,5 @@
+import { apiAuthHeaders } from "./stream.js";
+
 export const BACKEND_OFFLINE_MESSAGE = "Backend disconnected. Restart it, then refresh if this does not recover.";
 
 export function isNetworkError(err) {
@@ -5,11 +7,12 @@ export function isNetworkError(err) {
 }
 
 export async function api(path, options = {}) {
+  const { headers, ...fetchOptions } = options;
   let res;
   try {
     res = await fetch(path, {
-      headers: { "content-type": "application/json", ...(options.headers || {}) },
-      ...options,
+      ...fetchOptions,
+      headers: { "content-type": "application/json", ...apiAuthHeaders(), ...(headers || {}) },
     });
   } catch (err) {
     if (isNetworkError(err)) throw new Error(BACKEND_OFFLINE_MESSAGE);

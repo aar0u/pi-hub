@@ -16,7 +16,7 @@
     <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
     <symbol id="icon-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
     <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
-    <symbol id="icon-rewind" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></symbol>
+    <symbol id="icon-navigate" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></symbol>
     <symbol id="icon-fork" viewBox="0 0 24 24"><path d="M7 4v6a5 5 0 0 0 5 5h5"/><path d="M17 9v10"/><circle cx="7" cy="4" r="2"/><circle cx="17" cy="9" r="2"/><circle cx="17" cy="19" r="2"/></symbol>
     <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></symbol>
   </svg>
@@ -27,17 +27,23 @@
     </header>
     <form id="cwdForm" class="cwd-row">
       <input id="cwd" spellcheck="false" placeholder="working directory" />
+      <div id="cwdMenu" class="cwd-menu" hidden></div>
       <button class="icon-button" title="Switch directory" aria-label="Switch directory"><svg class="icon"><use href="#icon-enter"></use></svg></button>
     </form>
-    <div class="session-tools">
-      <button id="currentScope" class="active">Current</button>
-      <button id="allScope">All</button>
-    </div>
     <div id="sessions" class="sessions"></div>
+    <details id="filesPanel" class="files-panel" open>
+      <summary>Files</summary>
+      <div id="files" class="files"></div>
+    </details>
   </aside>
 
   <main>
-    <div id="status" class="status"></div>
+    <div class="topbar">
+      <div id="status" class="status"></div>
+      <button id="treeToggle" class="inspector-toggle" type="button">Tree</button>
+      <button id="systemToggle" class="inspector-toggle" type="button">System</button>
+    </div>
+    <div id="systemPanel" class="inspector-panel" hidden></div>
     <section id="chat" class="chat"></section>
     <form id="promptForm" class="composer">
       <textarea id="prompt" rows="3" placeholder="Request… Enter sends, Shift+Enter newline"></textarea>

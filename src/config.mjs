@@ -2,6 +2,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_PORT = 8787;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 function parsePort(value) {
   if (value === undefined) return DEFAULT_PORT;
@@ -16,3 +17,13 @@ export const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const publicDir = join(rootDir, "public");
 export const port = parsePort(process.env.PORT);
 export const host = process.env.HOST ?? "127.0.0.1";
+export const apiToken = process.env.PI_WEB_TOKEN || "";
+export const isLoopbackHost = LOOPBACK_HOSTS.has(host);
+
+if (!isLoopbackHost && process.env.PI_WEB_ALLOW_REMOTE !== "1") {
+  throw new Error("Refusing to bind non-loopback HOST without PI_WEB_ALLOW_REMOTE=1. Set PI_WEB_TOKEN and put pi-web behind a trusted network boundary.");
+}
+
+if (!isLoopbackHost && !apiToken) {
+  throw new Error("Refusing remote access without PI_WEB_TOKEN. Open the UI with #token=<token> so the browser can authenticate API calls.");
+}

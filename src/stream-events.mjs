@@ -1,7 +1,7 @@
 import { textOfContent } from "./session-state.mjs";
 import { writeNdjson } from "./http.mjs";
 
-function shortText(value, max = 160) {
+function shortText(value, max = 400) {
   let text;
   try {
     text = typeof value === "string" ? value : JSON.stringify(value ?? "");

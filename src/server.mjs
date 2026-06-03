@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
-import { promises as fs, statSync } from "node:fs";
-import { resolve } from "node:path";
-import { host, port, publicDir } from "./config.mjs";
+import { apiToken, host, port, publicDir } from "./config.mjs";
 import { HttpError, readBody, sendError, sendJson, writeNdjson } from "./http.mjs";
 import { makeRuntime, SessionManager } from "./pi-runtime.mjs";
-import { assertKnownSessionPath, listSessions, sessionPayload } from "./session-state.mjs";
+import { registerFilesRoutes } from "./routes/files.mjs";
+import { registerRuntimeRoutes } from "./routes/runtime.mjs";
+import { registerSessionsRoutes } from "./routes/sessions.mjs";
+import { sessionPayload } from "./session-state.mjs";
 import { serveStatic } from "./static.mjs";
 import { subscribePromptEvents } from "./stream-events.mjs";
 
@@ -12,30 +13,6 @@ let cwd = process.cwd();
 let runtime = await makeRuntime(cwd, SessionManager.continueRecent(cwd));
 let operationState = "idle";
 let activePrompt = null;
-
-function isSafeEntryId(entryId) {
-  return /^[A-Za-z0-9_-]+$/.test(entryId);
-}
-
-function assertDirectory(value) {
-  if (typeof value !== "string" || !value.trim()) throw new HttpError(400, "Invalid working directory");
-  const dir = resolve(value);
-  try {
-    const stat = statSync(dir, { throwIfNoEntry: false });
-    if (!stat) throw new HttpError(404, "Directory not found");
-    if (!stat.isDirectory()) throw new HttpError(400, "Not a directory");
-    return dir;
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-    throw new HttpError(403, "Cannot access working directory");
-  }
-}
-
-function assertEntryId(value) {
-  if (typeof value !== "string") throw new HttpError(400, "Missing entryId");
-  if (!isSafeEntryId(value)) throw new HttpError(400, "Invalid entryId format");
-  return value;
-}
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -84,51 +61,18 @@ async function withRuntimeMutation(fn) {
   }
 }
 
-const apiRoutes = new Map([
-  ["GET /api/state", async (_req, res, _url) => sendJson(res, currentState())],
-  ["GET /api/sessions", async (_req, res, url) => sendJson(res, await listSessions(url.searchParams.get("scope") ?? "current", runtime))],
-  ["POST /api/cwd", async (req, res, _url) => {
-    const { cwd: next } = await readBody(req);
-    const nextCwd = assertDirectory(next);
-    await withRuntimeMutation(async () => {
-      await runtime.dispose();
-      cwd = nextCwd;
-      runtime = await makeRuntime(cwd, SessionManager.continueRecent(cwd));
-    });
-    sendJson(res, currentState());
-  }],
-  ["POST /api/sessions/new", async (_req, res, _url) => {
-    await withRuntimeMutation(() => runtime.newSession());
-    sendJson(res, currentState());
-  }],
-  ["POST /api/sessions/open", async (req, res, _url) => {
-    const { path: value } = await readBody(req);
-    const path = await assertKnownSessionPath(value);
-    await withRuntimeMutation(async () => {
-      await runtime.switchSession(path);
-      cwd = runtime.cwd;
-    });
-    sendJson(res, currentState());
-  }],
-  ["DELETE /api/sessions", async (_req, res, url) => {
-    const path = await assertKnownSessionPath(url.searchParams.get("path"));
-    await withRuntimeMutation(async () => {
-      if (resolve(path) === resolve(runtime.session.sessionFile ?? "")) await runtime.newSession();
-      await fs.rm(path, { force: true });
-    });
-    sendJson(res, { ok: true, state: currentState() });
-  }],
-  ["POST /api/rewind", async (req, res, _url) => {
-    const { entryId: value } = await readBody(req);
-    await withRuntimeMutation(() => runtime.session.navigateTree(assertEntryId(value), { summarize: false, label: "rewind" }));
-    sendJson(res, currentState());
-  }],
-  ["POST /api/fork", async (req, res, _url) => {
-    const { entryId: value } = await readBody(req);
-    const result = await withRuntimeMutation(() => runtime.fork(assertEntryId(value)));
-    sendJson(res, { ...currentState(), fork: result });
-  }],
-]);
+const apiRoutes = new Map();
+const routeContext = {
+  getCwd: () => cwd,
+  setCwd: (nextCwd) => { cwd = nextCwd; },
+  getRuntime: () => runtime,
+  setRuntime: (nextRuntime) => { runtime = nextRuntime; },
+  currentState,
+  withRuntimeMutation,
+};
+registerRuntimeRoutes(apiRoutes, routeContext);
+registerSessionsRoutes(apiRoutes, routeContext);
+registerFilesRoutes(apiRoutes, routeContext);
 
 function clearActivePrompt(activeSession) {
   if (activePrompt?.session === activeSession) activePrompt = null;
@@ -169,9 +113,10 @@ async function handlePrompt(req, res) {
 
   let completed = false;
   const heartbeat = setInterval(() => writeNdjson(res, { type: "ping", timestamp: Date.now() }), 10_000);
-  req.on("close", () => {
+  res.on("close", () => {
+    if (completed) return;
     if (activePrompt?.session === activeSession) activePrompt.clientClosed = true;
-    if (!completed) void activeSession.abort().catch(() => {});
+    void activeSession.abort().catch(() => {});
   });
 
   const unsubscribe = subscribePromptEvents(activeSession, res, () => sessionPayload(activeRuntime));
@@ -190,8 +135,29 @@ async function handlePrompt(req, res) {
   }
 }
 
+function requestOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return null;
+  try {
+    return new URL(origin);
+  } catch {
+    throw new HttpError(403, "Invalid request origin");
+  }
+}
+
+function assertApiAccess(req) {
+  const origin = requestOrigin(req);
+  if (origin && origin.host !== req.headers.host) throw new HttpError(403, "Cross-origin API requests are not allowed");
+
+  if (!apiToken) return;
+  const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = req.headers["x-pi-web-token"] || bearer;
+  if (token !== apiToken) throw new HttpError(401, "Missing or invalid API token");
+}
+
 async function handleApi(req, res, url) {
   try {
+    assertApiAccess(req);
     if (req.method === "POST" && url.pathname === "/api/prompt") {
       await handlePrompt(req, res);
       return;

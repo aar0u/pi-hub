@@ -1,66 +1,13 @@
 import { BACKEND_OFFLINE_MESSAGE, api, isNetworkError, responseError } from "./api.js";
+import { renderMarkdown } from "./markdown.js";
+import { apiAuthHeaders, installApiTokenFromHash, readNdjsonStream, STREAM_AWARENESS_TIMEOUT_MS } from "./stream.js";
+import { $, compactText, formatDuration, icon, setIcon } from "./ui.js";
 
-function renderMarkdown(text, container) {
-  let last = 0;
-  const re = /```(\w*)\n([\s\S]*?)```/g;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) container.append(new Text(text.slice(last, m.index)));
-    const pre = document.createElement("pre");
-    pre.className = "code-block";
-    const code = document.createElement("code");
-    code.textContent = m[2];
-    if (m[1]) code.className = `language-${m[1]}`;
-    if (window.hljs) hljs.highlightElement(code);
-    pre.append(code);
-    if (m[1]) {
-      const lang = document.createElement("span");
-      lang.className = "code-lang";
-      lang.textContent = m[1];
-      pre.append(lang);
-    }
-    const copy = document.createElement("button");
-    copy.className = "code-copy";
-    copy.textContent = "Copy";
-    copy.onclick = () => {
-      navigator.clipboard.writeText(code.textContent);
-      copy.textContent = "Copied!";
-      setTimeout(() => (copy.textContent = "Copy"), 1500);
-    };
-    pre.append(copy);
-    container.append(pre);
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) container.append(new Text(text.slice(last)));
-}
+installApiTokenFromHash();
 
-const $ = (id) => document.getElementById(id);
-const state = { scope: "current", data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false };
+const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], inspector: null };
 
-const STREAM_AWARENESS_TIMEOUT_MS = 45_000;
 const BACKEND_CHECK_INTERVAL_MS = 5_000;
-
-function icon(name) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.classList.add("icon");
-  svg.setAttribute("aria-hidden", "true");
-  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-  use.setAttribute("href", `#icon-${name}`);
-  svg.append(use);
-  return svg;
-}
-
-function setIcon(el, name) {
-  const use = el.querySelector("use");
-  if (use) use.setAttribute("href", `#icon-${name}`);
-}
-
-function formatDuration(ms) {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return minutes ? `${minutes}m${String(rest).padStart(2, "0")}s` : `${rest}s`;
-}
 
 function messageText(m) {
   if (m.error) return m.error;
@@ -69,11 +16,36 @@ function messageText(m) {
 }
 
 function canCollapse(m) {
-  return m.role === "assistant" || m.role === "toolResult" || m.role === "bashExecution" || m.role === "custom";
+  return m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.role === "bashExecution" || m.role === "custom";
+}
+
+function messageSummary(m) {
+  return compactText(messageText(m));
+}
+
+function assistantTurnSummary(messages) {
+  const text = messages
+    .map((m) => messageText(m))
+    .join(" ")
+    .replace(/^\s*\[tool: ([^\]]+)\].*$/gm, "tool: $1");
+  return compactText(text);
 }
 
 function focusPrompt() {
   $("prompt")?.focus();
+}
+
+function insertPromptText(text, replace = false) {
+  const prompt = $("prompt");
+  if (!prompt) return;
+  if (replace) {
+    prompt.value = text;
+  } else {
+    const prefix = prompt.value && !/\s$/.test(prompt.value) ? " " : "";
+    prompt.value += `${prefix}${text}`;
+  }
+  prompt.focus();
+  prompt.selectionStart = prompt.selectionEnd = prompt.value.length;
 }
 
 function setStreamingUi(streaming) {
@@ -105,12 +77,8 @@ function renderState(data, opts = {}) {
   const prevScrollHeight = chat.scrollHeight;
   updateChrome(data);
   chat.innerHTML = "";
-  if (data.timeline) {
-    renderTimeline(data.timeline);
-  } else {
-    for (const m of data.messages || []) addMessage(m);
-    if ((data.staleMessages || []).length) addStaleGroup(data.staleMessages);
-  }
+  if (data.turns) renderChatTurns(data.turns, chat);
+  else renderMessageRuns(data.messages || [], chat);
   if (opts.preserveScroll) {
     chat.scrollTop = prevScrollTop + (chat.scrollHeight - prevScrollHeight);
   } else {
@@ -119,51 +87,62 @@ function renderState(data, opts = {}) {
   }
 }
 
-function renderTimeline(timeline) {
-  let staleRun = [];
+function renderChatTurns(turns, container) {
+  for (const turn of turns) {
+    if (turn.role === "user") addMessage(turn.message, { container });
+    else addAssistantTurnFromParts(turn, { container });
+  }
+}
+
+function renderMessageRuns(messages, container) {
   let assistantRun = [];
   const flushAssistant = () => {
     if (!assistantRun.length) return;
-    addAssistantTurn(assistantRun);
+    addAssistantTurn(assistantRun, { container });
     assistantRun = [];
   };
-  const flushStale = () => {
-    if (!staleRun.length) return;
-    flushAssistant();
-    addStaleGroup(staleRun);
-    staleRun = [];
-  };
-  for (const m of timeline) {
-    if (m.stale) {
-      staleRun.push(m);
-      continue;
-    }
-    flushStale();
+  for (const m of messages) {
     if (m.role === "user") {
       flushAssistant();
-      addMessage(m);
+      addMessage(m, { container });
     } else {
       assistantRun.push(m);
     }
   }
-  flushStale();
   flushAssistant();
 }
 
 function splitAssistantParts(text) {
   const parts = [];
-  const re = /^\s*\[tool: ([^\]]+)\]\s*$/gm;
+  const re = /^\s*\[tool: ([^\]]+)\](?:\s+([^\n]+))?\s*$/gm;
   let last = 0;
   let match;
   while ((match = re.exec(text || ""))) {
     const before = text.slice(last, match.index).trim();
     if (before) parts.push({ type: "text", text: before });
-    parts.push({ type: "tool", name: match[1], call: match[0].trim(), results: [], error: false });
+    parts.push({ type: "tool", name: match[1], call: match[2] || match[0].trim(), results: [], error: false });
     last = match.index + match[0].length;
   }
   const rest = (text || "").slice(last).trim();
   if (rest) parts.push({ type: "text", text: rest });
   return parts;
+}
+
+function toolPreview(command, name) {
+  return (command || "")
+    .replace(new RegExp(`^[✓▶…]\\s*${name || ""}\\s*(queued|running|done|update)?\\s*`, "i"), "")
+    .trim();
+}
+
+function appendToolSummary(summary, label, command, name) {
+  const title = document.createElement("span");
+  title.className = "turn-tool-name";
+  title.textContent = label;
+  const preview = document.createElement("span");
+  preview.className = "turn-tool-preview";
+  preview.textContent = toolPreview(command, name);
+  preview.title = preview.textContent;
+  summary.append(title, preview);
 }
 
 function turnParts(messages) {
@@ -189,20 +168,109 @@ function turnParts(messages) {
   return parts;
 }
 
-function addAssistantTurn(messages, opts = {}) {
+function addMessageAction(target, kind, label, iconName, onClick) {
+  if (!target || !onClick) return;
+  const actions = document.createElement("div");
+  actions.className = `msg-actions ${kind}-actions`;
+  const button = document.createElement("button");
+  button.className = "msg-action";
+  button.type = "button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.append(icon(iconName), label);
+  button.onclick = onClick;
+  actions.append(button);
+  target.append(actions);
+}
+
+function addAssistantTurnFromParts(turn, opts = {}) {
   const target = opts.container || $("chat");
   const el = document.createElement("article");
-  el.className = `msg assistant turn ${messages.some((m) => m.error || m.isError) ? "error" : ""}`;
+  el.className = `msg assistant turn ${turn.error ? "error" : ""}`;
+  const ids = turn.ids || [];
+  if (ids.length) {
+    el.dataset.id = ids[ids.length - 1];
+    el.dataset.ids = ids.join(" ");
+  }
   const head = document.createElement("div");
   head.className = "msg-head";
   const role = document.createElement("span");
   role.textContent = "assistant";
+  const summaryText = document.createElement("span");
+  summaryText.className = "msg-summary";
+  summaryText.textContent = compactText((turn.parts || []).map((part) => part.type === "text" ? part.text : `tool: ${part.name}`).join(" "));
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   const indicator = document.createElement("span");
   indicator.className = "collapse-indicator";
   indicator.append(icon("chevron-up"));
-  head.append(role, spacer, indicator);
+  head.append(role, summaryText, spacer, indicator);
+  head.title = "Collapse/expand";
+  head.onclick = () => {
+    el.classList.toggle("collapsed");
+    setIcon(indicator, el.classList.contains("collapsed") ? "chevron-down" : "chevron-up");
+  };
+
+  const body = document.createElement("div");
+  body.className = "msg-body turn-body";
+  for (const part of turn.parts || []) {
+    if (part.type === "text") {
+      if (!part.text) continue;
+      const section = document.createElement("div");
+      section.className = "turn-text";
+      renderMarkdown(part.text, section);
+      body.append(section);
+      continue;
+    }
+
+    const tool = document.createElement("details");
+    tool.className = `turn-tool ${part.error ? "error" : ""}`;
+    const summary = document.createElement("summary");
+    appendToolSummary(summary, part.name || "tool", part.call, part.name);
+    const content = document.createElement("div");
+    content.className = "turn-tool-body";
+    const command = document.createElement("div");
+    command.className = "turn-tool-command";
+    command.textContent = part.call || part.name || "tool";
+    const result = document.createElement("div");
+    result.className = "turn-tool-result";
+    result.textContent = part.results?.length ? part.results.join("\n\n") : "(no output)";
+    content.append(command, result);
+    tool.append(summary, content);
+    body.append(tool);
+  }
+  if (!body.childElementCount) body.textContent = "";
+
+  el.append(head, body);
+  target.append(el);
+  const forkEntry = ids[ids.length - 1];
+  if (forkEntry) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
+  if (target === $("chat")) scrollChatToBottom();
+  return { el, body };
+}
+
+function addAssistantTurn(messages, opts = {}) {
+  const target = opts.container || $("chat");
+  const el = document.createElement("article");
+  el.className = `msg assistant turn ${messages.some((m) => m.role === "assistant" && (m.error || m.isError)) ? "error" : ""}`;
+  const ids = messages.map((m) => m.id).filter(Boolean);
+  if (ids.length) {
+    el.dataset.id = ids[ids.length - 1];
+    el.dataset.ids = ids.join(" ");
+  }
+  const head = document.createElement("div");
+  head.className = "msg-head";
+  const role = document.createElement("span");
+  role.textContent = "assistant";
+  const summaryText = document.createElement("span");
+  summaryText.className = "msg-summary";
+  summaryText.textContent = assistantTurnSummary(messages);
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  const indicator = document.createElement("span");
+  indicator.className = "collapse-indicator";
+  indicator.append(icon("chevron-up"));
+  head.append(role, summaryText, spacer, indicator);
   head.title = "Collapse/expand";
   head.onclick = () => {
     el.classList.toggle("collapsed");
@@ -223,19 +291,24 @@ function addAssistantTurn(messages, opts = {}) {
     const tool = document.createElement("details");
     tool.className = `turn-tool ${part.error ? "error" : ""}`;
     const summary = document.createElement("summary");
-    summary.textContent = part.name;
+    appendToolSummary(summary, part.name, part.call, part.name);
     const content = document.createElement("div");
     content.className = "turn-tool-body";
+    const command = document.createElement("div");
+    command.className = "turn-tool-command";
+    command.textContent = part.call || part.name;
     const result = document.createElement("div");
     result.className = "turn-tool-result";
     result.textContent = part.results.length ? part.results.join("\n\n") : "(no output)";
-    content.append(result);
+    content.append(command, result);
     tool.append(summary, content);
     body.append(tool);
   }
 
   el.append(head, body);
   target.append(el);
+  const forkEntry = [...messages].reverse().find((m) => m.id)?.id;
+  if (forkEntry) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
   if (target === $("chat")) scrollChatToBottom();
   return { el, body };
 }
@@ -243,15 +316,18 @@ function addAssistantTurn(messages, opts = {}) {
 function addMessage(m, opts = {}) {
   const target = opts.container || $("chat");
   const el = document.createElement("article");
-  el.className = `msg ${m.role || "assistant"} ${m.stale ? "stale" : ""} ${m.error || m.isError ? "error" : ""}`;
+  el.className = `msg ${m.role || "assistant"} ${m.error || m.isError ? "error" : ""}`;
   el.dataset.id = m.id || "";
   const head = document.createElement("div");
   head.className = "msg-head";
   const role = document.createElement("span");
   role.textContent = m.toolName ? `${m.role || "tool"}: ${m.toolName}` : (m.role || "assistant");
+  const summaryText = document.createElement("span");
+  summaryText.className = "msg-summary";
+  summaryText.textContent = messageSummary(m);
   const spacer = document.createElement("span");
   spacer.className = "spacer";
-  head.append(role, spacer);
+  head.append(role, summaryText, spacer);
   if (canCollapse(m)) {
     const defaultCollapsed = m.role === "toolResult";
     if (defaultCollapsed) el.classList.add("collapsed");
@@ -266,21 +342,6 @@ function addMessage(m, opts = {}) {
       setIcon(indicator, el.classList.contains("collapsed") ? "chevron-down" : "chevron-up");
     };
   }
-  if (m.role === "user" && m.id) {
-    const rewind = document.createElement("button");
-    rewind.className = "icon-button";
-    rewind.title = "Rewind to this request";
-    rewind.setAttribute("aria-label", "Rewind to this request");
-    rewind.append(icon("rewind"));
-    rewind.onclick = () => doRewind(m.id);
-    const fork = document.createElement("button");
-    fork.className = "icon-button";
-    fork.title = "Fork from this request";
-    fork.setAttribute("aria-label", "Fork from this request");
-    fork.append(icon("fork"));
-    fork.onclick = () => doFork(m.id);
-    head.append(rewind, fork);
-  }
   const body = document.createElement("div");
   body.className = "msg-body";
   renderMarkdown(messageText(m), body);
@@ -292,35 +353,10 @@ function addMessage(m, opts = {}) {
   }
   el.append(head, body);
   target.append(el);
+  if (m.role === "user" && m.id) addMessageAction(target, "user", "Edit from here", "navigate", () => doEditHere(m.id));
+  if (m.role === "assistant" && m.id) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(m.id));
   if (target === $("chat")) scrollChatToBottom();
   return { el, head, body };
-}
-
-function addStaleGroup(messages) {
-  const group = document.createElement("section");
-  group.className = "stale-group collapsed";
-  const head = document.createElement("div");
-  head.className = "stale-head";
-  const count = document.createElement("span");
-  const first = messages.find((m) => m.role === "user") || messages[0];
-  const label = first?.text ? `: ${first.text.replace(/\s+/g, " ").slice(0, 60)}` : "";
-  count.textContent = `rewound/fork branch (${messages.length})${label}`;
-  const hint = document.createElement("span");
-  hint.className = "small";
-  hint.textContent = "greyed, click to recover/fork";
-  const indicator = document.createElement("span");
-  indicator.className = "collapse-indicator";
-  indicator.append(icon("chevron-down"));
-  head.append(count, hint, indicator);
-  const body = document.createElement("div");
-  body.className = "stale-body";
-  group.append(head, body);
-  head.onclick = () => {
-    group.classList.toggle("collapsed");
-    setIcon(indicator, group.classList.contains("collapsed") ? "chevron-down" : "chevron-up");
-  };
-  $("chat").append(group);
-  for (const m of messages) addMessage(m, { container: body });
 }
 
 function errorMessage(err) {
@@ -352,8 +388,167 @@ async function runAction(action) {
   }
 }
 
+function flashStatus(message, kind = "notice") {
+  const status = $("status");
+  const className = kind === "error" ? "status-error" : "status-flash";
+  status.textContent = message;
+  status.classList.remove("status-flash", "status-error");
+  void status.offsetWidth;
+  status.classList.add(className);
+  setTimeout(() => status.classList.remove(className), 1100);
+}
+
+function locateMessage(entryId) {
+  if (!entryId) return;
+  const chat = $("chat");
+  const target = chat.querySelector(`[data-id="${CSS.escape(entryId)}"], [data-ids~="${CSS.escape(entryId)}"]`);
+  chat.querySelectorAll(".located").forEach((el) => el.classList.remove("located"));
+  if (!target) {
+    flashStatus("Tree node is outside the active chat branch. Use Edit/Fork from a visible message to change branch/session.", "error");
+    return;
+  }
+  target.classList.add("located");
+  target.scrollIntoView({ block: "start", behavior: "smooth" });
+  setTimeout(() => target.classList.remove("located"), 1600);
+}
+
+function treeNodeButton(item) {
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = `tree-node ${item.active ? "active" : "off-branch"} ${item.current ? "current" : ""}`;
+  node.title = item.text || item.id;
+  node.onclick = () => locateMessage(item.id);
+  node.style.paddingLeft = `${6 + Math.min(item.depth || 0, 8) * 14}px`;
+  const connector = document.createElement("span");
+  connector.className = "tree-connector";
+  connector.textContent = item.connector === "└" ? "↳" : (item.connector || "");
+  const marker = document.createElement("span");
+  marker.className = "tree-marker";
+  marker.textContent = item.current ? "●" : (item.active ? "•" : "○");
+  const text = document.createElement("span");
+  text.className = "tree-text";
+  text.textContent = item.text || item.id;
+  const role = document.createElement("span");
+  role.className = "tree-role";
+  role.textContent = item.role || item.type;
+  const id = document.createElement("span");
+  id.className = "tree-id";
+  id.textContent = item.id;
+  node.append(connector, marker, text, role, id);
+  return node;
+}
+
+function renderTreePanel(data = state.data) {
+  const panel = $("systemPanel");
+  panel.innerHTML = "";
+  const items = data?.tree || [];
+  panel.classList.toggle("empty", !items.length);
+  if (!items.length) {
+    panel.textContent = "No tree entries yet.";
+    return;
+  }
+
+  const tree = document.createElement("div");
+  tree.className = "tree-view";
+  for (const item of items) {
+    if (item.message) tree.append(treeNodeButton(item));
+  }
+  if (!tree.childElementCount) {
+    panel.textContent = "No message nodes in this tree.";
+  } else {
+    panel.append(tree);
+    tree.querySelector(".tree-node.current")?.scrollIntoView({ block: "center" });
+  }
+}
+
+function updateInspectorPanel(data = state.data) {
+  const panel = $("systemPanel");
+  if (!panel || panel.hidden) return;
+  if (state.inspector === "tree") {
+    renderTreePanel(data);
+    return;
+  }
+  const prompt = data?.systemPrompt;
+  panel.classList.toggle("empty", !prompt);
+  panel.textContent = prompt || (prompt === "" ? "System prompt is empty." : "Send a message to load the system prompt.");
+  panel.scrollTop = 0;
+}
+
+function renderCwdMenu() {
+  const menu = $("cwdMenu");
+  if (!menu) return;
+  menu.innerHTML = "";
+  for (const cwd of state.cwdChoices) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.textContent = cwd;
+    item.title = cwd;
+    item.onclick = () => void runAction(() => switchCwd(cwd));
+    menu.append(item);
+  }
+  menu.hidden = !state.cwdChoices.length;
+}
+
+function hideCwdMenuSoon() {
+  setTimeout(() => {
+    const active = document.activeElement;
+    if (active?.closest?.("#cwdForm")) return;
+    $("cwdMenu").hidden = true;
+  }, 120);
+}
+
+async function loadCwdOptions() {
+  state.cwdChoices = await api("/api/cwds");
+  if (!$("cwdMenu")?.hidden) renderCwdMenu();
+}
+
+async function loadFiles(path = state.filePath) {
+  const box = $("files");
+  if (!box || !state.data?.cwd) return;
+  box.textContent = "Loading…";
+  box.className = "files file-empty";
+  try {
+    const data = await api(`/api/files?path=${encodeURIComponent(path || ".")}`);
+    state.filePath = data.relativePath || ".";
+    box.className = "files";
+    box.innerHTML = "";
+    if (data.parentPath) {
+      const up = document.createElement("button");
+      up.className = "file-row";
+      up.innerHTML = `<span class="file-name">../</span><span></span>`;
+      up.onclick = () => void loadFiles(data.parentPath);
+      box.append(up);
+    }
+    for (const entry of data.entries || []) {
+      const row = document.createElement("button");
+      row.className = "file-row";
+      const name = document.createElement("span");
+      name.className = "file-name";
+      name.textContent = `${entry.isDir ? "▸ " : ""}${entry.name}`;
+      name.title = entry.relativePath;
+      const mention = document.createElement("span");
+      mention.className = "file-mention";
+      mention.textContent = "@";
+      row.append(name, mention);
+      row.onclick = () => entry.isDir ? void loadFiles(entry.path) : insertPromptText(`\`${entry.relativePath}\``);
+      mention.onclick = (ev) => {
+        ev.stopPropagation();
+        insertPromptText(`\`${entry.relativePath}\``);
+      };
+      box.append(row);
+    }
+    if (!box.childElementCount) {
+      box.className = "files file-empty";
+      box.textContent = "empty";
+    }
+  } catch (err) {
+    box.className = "files file-empty";
+    box.textContent = errorMessage(err);
+  }
+}
+
 async function loadSessions() {
-  const sessions = await api(`/api/sessions?scope=${state.scope}`);
+  const sessions = await api("/api/sessions");
   const box = $("sessions");
   box.innerHTML = "";
   const activeSessionPath = state.data?.sessionFile;
@@ -375,6 +570,22 @@ async function loadSessions() {
     cwd.className = "session-cwd";
     cwd.textContent = s.cwd || "";
     main.append(title, meta, cwd);
+    const actions = document.createElement("span");
+    actions.className = "session-actions";
+    const rename = document.createElement("button");
+    rename.className = "rename icon-button";
+    rename.title = "Rename session";
+    rename.setAttribute("aria-label", "Rename session");
+    rename.textContent = "✎";
+    rename.onclick = (ev) => {
+      ev.stopPropagation();
+      void runAction(async () => {
+        const name = prompt("Session name", s.name || "");
+        if (name === null) return;
+        await api("/api/sessions", { method: "PATCH", body: JSON.stringify({ path: s.path, name }) });
+        await refresh({ preserveScroll: true });
+      });
+    };
     const del = document.createElement("button");
     del.className = "delete icon-button";
     del.title = "Delete session";
@@ -388,8 +599,9 @@ async function loadSessions() {
         await refresh();
       });
     };
-    row.append(main, del);
-    row.onclick = () => void runAction(async () => { renderState(await api("/api/sessions/open", { method: "POST", body: JSON.stringify({ path: s.path }) })); await loadSessions(); });
+    actions.append(rename, del);
+    row.append(main, actions);
+    row.onclick = () => void runAction(async () => { renderState(await api("/api/sessions/open", { method: "POST", body: JSON.stringify({ path: s.path }) })); await updateSidebarData(); });
     box.append(row);
   }
 }
@@ -403,35 +615,48 @@ function formatSessionPath(path) {
 }
 
 function updateChrome(data) {
+  const previousCwd = state.data?.cwd;
   state.data = data;
+  if (previousCwd !== data.cwd) state.filePath = ".";
   $("cwd").value = data.cwd || "";
   const { name, parent } = formatSessionPath(data.sessionFile);
   $("status").classList.remove("backend-offline");
-  $("status").textContent = parent ? `${parent}/${name}` : name || "new session";
+  $("status").textContent = data.sessionName || (parent ? `${parent}/${name}` : name || "new session");
+  updateInspectorPanel(data);
+}
+
+async function updateSidebarData() {
+  await Promise.all([loadSessions(), loadCwdOptions(), loadFiles()]);
 }
 
 async function refresh(opts = {}) {
   renderState(await api("/api/state"), opts);
-  await loadSessions();
+  await updateSidebarData();
 }
 
 async function syncStateWithoutRerender() {
   updateChrome(await api("/api/state"));
-  await loadSessions();
+  await updateSidebarData();
 }
 
 async function sessionAction(endpoint, entryId) {
   try {
-    renderState(await api(endpoint, { method: "POST", body: JSON.stringify({ entryId }) }));
-    await loadSessions();
+    const data = await api(endpoint, { method: "POST", body: JSON.stringify({ entryId }) });
+    renderState(data);
+    await updateSidebarData();
+    return data;
   } catch (err) {
     $("status").textContent = errorMessage(err);
     await refresh();
+    return null;
   }
 }
 
-const doRewind = (entryId) => sessionAction("/api/rewind", entryId);
 const doFork = (entryId) => sessionAction("/api/fork", entryId);
+const doEditHere = async (entryId) => {
+  const data = await sessionAction("/api/navigate-tree", entryId);
+  if (typeof data?.navigation?.editorText === "string") insertPromptText(data.navigation.editorText, true);
+};
 
 async function sendPrompt(text) {
   state.streaming = true;
@@ -447,7 +672,7 @@ async function sendPrompt(text) {
   const streamParts = [];
   let activeToolPart = null;
   let gotVisibleResponse = false;
-  let timedOut = false;
+  let streamWarningShown = false;
   let latestPromptState = null;
   let lastStreamEventAt = Date.now();
   const startTime = Date.now();
@@ -457,9 +682,9 @@ async function sendPrompt(text) {
     if (!gotVisibleResponse) {
       const elapsed = Math.floor((now - startTime) / 1000);
       assistant.body.textContent = `waiting… (${elapsed}s)`;
-      if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
-        timedOut = true;
-        controller.abort();
+      if (idleMs > STREAM_AWARENESS_TIMEOUT_MS && !streamWarningShown) {
+        streamWarningShown = true;
+        $("status").textContent = `No visible response for ${formatDuration(idleMs)}; still waiting.`;
       }
       return;
     }
@@ -479,15 +704,20 @@ async function sendPrompt(text) {
   };
   const appendToolEvent = (evt) => {
     const name = evt.toolName || activeToolPart?.name || "tool";
+    if (evt.phase === "done") $("status").textContent = `${name} done`;
+    else $("status").textContent = `Running ${name}…`;
     if (!activeToolPart || activeToolPart.phase === "done") {
-      activeToolPart = { type: "tool", name, phase: evt.phase || "running", startedAt: Date.now(), endedAt: null, messages: [], error: false };
+      activeToolPart = { type: "tool", name, phase: evt.phase || "running", startedAt: Date.now(), endedAt: null, command: "", messages: [], error: false };
       streamParts.push(activeToolPart);
     }
     activeToolPart.name = name;
     activeToolPart.phase = evt.phase || activeToolPart.phase || "running";
     if (activeToolPart.phase === "done" && !activeToolPart.endedAt) activeToolPart.endedAt = Date.now();
     activeToolPart.error = Boolean(evt.isError || activeToolPart.error);
-    if (evt.message) activeToolPart.messages.push(evt.message);
+    if (evt.message) {
+      if (evt.phase === "queued" || evt.phase === "running") activeToolPart.command = evt.message;
+      else activeToolPart.messages.push(evt.message);
+    }
   };
   const renderAssistant = () => {
     assistant.body.textContent = "";
@@ -511,13 +741,16 @@ async function sendPrompt(text) {
       const summary = document.createElement("summary");
       const duration = formatDuration((part.endedAt || Date.now()) - part.startedAt);
       const phaseText = part.phase === "done" ? `done in ${duration}` : `${part.phase || "running"} for ${duration}`;
-      summary.textContent = `${part.name || "tool"} · ${phaseText}`;
+      appendToolSummary(summary, `${part.name || "tool"} · ${phaseText}`, part.command, part.name);
       const content = document.createElement("div");
       content.className = "turn-tool-body";
+      const command = document.createElement("div");
+      command.className = "turn-tool-command";
+      command.textContent = part.command || part.name || "tool";
       const result = document.createElement("div");
       result.className = "turn-tool-result";
-      result.textContent = part.messages.length ? part.messages.join("\n\n") : "running…";
-      content.append(result);
+      result.textContent = part.messages.length ? part.messages.join("\n\n") : (part.phase === "done" ? "(no output)" : "running…");
+      content.append(command, result);
       tool.append(summary, content);
       assistant.body.append(tool);
     }
@@ -529,56 +762,39 @@ async function sendPrompt(text) {
   try {
     const res = await fetch("/api/prompt", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...apiAuthHeaders() },
       body: JSON.stringify({ text }),
       signal: controller.signal,
     });
     if (!res.ok || !res.body) throw await responseError(res);
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let evt;
-        try {
-          evt = JSON.parse(line);
-        } catch (err) {
-          continue;
-        }
-        lastStreamEventAt = Date.now();
-        if (evt.type === "ping") continue;
-        if (evt.type === "delta") {
-          markVisible();
-          appendTextDelta(evt.delta || "");
-          renderAssistant();
-        }
-        if (evt.type === "tool") {
-          markVisible();
-          appendToolEvent(evt);
-          renderAssistant();
-        }
-        if (evt.type === "error") {
-          markVisible();
-          assistant.el.classList.add("error");
-          assistant.body.textContent = evt.message || "Unknown error";
-          if (evt.state) {
-            latestPromptState = evt.state;
-            state.data = evt.state;
-          }
-        }
-        if ((evt.type === "done" || evt.type === "state") && evt.state) {
+    await readNdjsonStream(res, (evt) => {
+      lastStreamEventAt = Date.now();
+      if (evt.type === "ping") return;
+      if (evt.type === "delta") {
+        markVisible();
+        appendTextDelta(evt.delta || "");
+        renderAssistant();
+      }
+      if (evt.type === "tool") {
+        markVisible();
+        appendToolEvent(evt);
+        renderAssistant();
+      }
+      if (evt.type === "error") {
+        markVisible();
+        assistant.el.classList.add("error");
+        assistant.body.textContent = evt.message || "Unknown error";
+        if (evt.state) {
           latestPromptState = evt.state;
           state.data = evt.state;
         }
       }
+      if ((evt.type === "done" || evt.type === "state") && evt.state) {
+        latestPromptState = evt.state;
+        state.data = evt.state;
+      }
       scrollChatToBottom();
-    }
+    });
     if (!gotVisibleResponse && !output) {
       assistant.el.classList.add("error");
       assistant.body.textContent = "No response content received.";
@@ -586,9 +802,7 @@ async function sendPrompt(text) {
   } catch (err) {
     assistant.el.classList.add("error");
     const disconnected = !state.abortRequested && isNetworkError(err);
-    assistant.body.textContent = timedOut
-      ? `No visible response after ${Math.round(STREAM_AWARENESS_TIMEOUT_MS / 1000)}s; request aborted.`
-      : (state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err)));
+    assistant.body.textContent = state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err));
     if (disconnected) markBackendOffline();
   } finally {
     clearInterval(progressInterval);
@@ -596,10 +810,10 @@ async function sendPrompt(text) {
     state.abortController = null;
     state.abortRequested = false;
     setStreamingUi(false);
-    if (!timedOut && latestPromptState) {
+    if (latestPromptState) {
       renderState(latestPromptState);
-      await loadSessions().catch(() => markBackendOffline());
-    } else if (!timedOut) {
+      await updateSidebarData().catch(() => markBackendOffline());
+    } else {
       await syncStateWithoutRerender().catch(() => markBackendOffline());
     }
   }
@@ -628,16 +842,50 @@ $("prompt").addEventListener("keydown", (ev) => {
     $("promptForm").requestSubmit();
   }
 });
+async function switchCwd(nextCwd) {
+  if (!nextCwd) return;
+  $("cwdMenu").hidden = true;
+  renderState(await api("/api/cwd", { method: "POST", body: JSON.stringify({ cwd: nextCwd }) }));
+  await updateSidebarData();
+}
+
 $("cwdForm").onsubmit = (ev) => {
   ev.preventDefault();
-  void runAction(async () => {
-    renderState(await api("/api/cwd", { method: "POST", body: JSON.stringify({ cwd: $("cwd").value }) }));
-    await loadSessions();
-  });
+  void runAction(() => switchCwd($("cwd").value));
 };
-$("newSession").onclick = () => void runAction(async () => { renderState(await api("/api/sessions/new", { method: "POST" })); await loadSessions(); focusPrompt(); });
-$("currentScope").onclick = () => void runAction(async () => { state.scope = "current"; $("currentScope").classList.add("active"); $("allScope").classList.remove("active"); await loadSessions(); });
-$("allScope").onclick = () => void runAction(async () => { state.scope = "all"; $("allScope").classList.add("active"); $("currentScope").classList.remove("active"); await loadSessions(); });
+$("cwd").onfocus = renderCwdMenu;
+$("cwd").onblur = hideCwdMenuSoon;
+$("cwd").oninput = renderCwdMenu;
+$("newSession").onclick = () => void runAction(async () => { renderState(await api("/api/sessions/new", { method: "POST" })); await updateSidebarData(); focusPrompt(); });
+function closeInspector() {
+  const panel = $("systemPanel");
+  state.inspector = null;
+  panel.hidden = true;
+  $("systemToggle").classList.remove("active");
+  $("treeToggle").classList.remove("active");
+}
+
+function toggleInspector(kind) {
+  const panel = $("systemPanel");
+  const nextHidden = state.inspector === kind && !panel.hidden;
+  if (nextHidden) {
+    closeInspector();
+    return;
+  }
+  state.inspector = kind;
+  panel.hidden = false;
+  $("systemToggle").classList.toggle("active", kind === "system");
+  $("treeToggle").classList.toggle("active", kind === "tree");
+  updateInspectorPanel();
+}
+
+$("systemToggle").onclick = () => toggleInspector("system");
+$("treeToggle").onclick = () => toggleInspector("tree");
+document.addEventListener("click", (ev) => {
+  if ($("systemPanel").hidden) return;
+  if (ev.target.closest("#systemPanel, #systemToggle, #treeToggle")) return;
+  closeInspector();
+});
 
 setInterval(() => void checkBackend(), BACKEND_CHECK_INTERVAL_MS);
 
