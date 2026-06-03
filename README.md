@@ -17,10 +17,10 @@ pnpm build
 pnpm start
 ```
 
-Set `PORT` to override the default `8787`.
+Set `PORT` to override the default `8787`. The server binds to `127.0.0.1` by default; set `HOST` explicitly if you need another interface.
 
 ## Notes
 
-- Server is TypeScript using Node's built-in HTTP server.
+- Server is native ESM using Node's built-in HTTP server.
 - Client is vanilla JS/CSS/HTML.
 - Uses pi's SDK runtime for sessions, streaming prompts, rewind (`navigateTree`) and fork.

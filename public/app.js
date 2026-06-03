@@ -1,3 +1,5 @@
+import { BACKEND_OFFLINE_MESSAGE, api, isNetworkError, responseError } from "./api.js";
+
 function renderMarkdown(text, container) {
   let last = 0;
   const re = /```(\w*)\n([\s\S]*?)```/g;
@@ -33,28 +35,7 @@ function renderMarkdown(text, container) {
 }
 
 const $ = (id) => document.getElementById(id);
-const BACKEND_OFFLINE_MESSAGE = "Backend disconnected. Restart it, then refresh if this does not recover.";
 const state = { scope: "current", data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false };
-
-function isNetworkError(err) {
-  return err instanceof TypeError || (err instanceof DOMException && err.name === "AbortError");
-}
-
-async function api(path, options = {}) {
-  let res;
-  try {
-    res = await fetch(path, {
-      headers: { "content-type": "application/json", ...(options.headers || {}) },
-      ...options,
-    });
-  } catch (err) {
-    if (isNetworkError(err)) throw new Error(BACKEND_OFFLINE_MESSAGE);
-    throw err;
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) throw new Error(data.error || res.statusText);
-  return data;
-}
 
 const STREAM_AWARENESS_TIMEOUT_MS = 45_000;
 const BACKEND_CHECK_INTERVAL_MS = 5_000;
@@ -472,22 +453,21 @@ async function sendPrompt(text) {
   const startTime = Date.now();
   const progressInterval = setInterval(() => {
     const now = Date.now();
+    const idleMs = now - lastStreamEventAt;
     if (!gotVisibleResponse) {
       const elapsed = Math.floor((now - startTime) / 1000);
       assistant.body.textContent = `waiting… (${elapsed}s)`;
+      if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
+        timedOut = true;
+        controller.abort();
+      }
       return;
     }
     if (activeToolPart && activeToolPart.phase !== "done") renderAssistant();
-    const idleMs = now - lastStreamEventAt;
     if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
       $("status").textContent = `No stream updates for ${formatDuration(idleMs)}; backend/tool may be stuck.`;
     }
   }, 1000);
-  const timeout = setTimeout(() => {
-    if (gotVisibleResponse) return;
-    timedOut = true;
-    controller.abort();
-  }, STREAM_AWARENESS_TIMEOUT_MS);
   const appendTextDelta = (delta) => {
     output += delta;
     let part = streamParts[streamParts.length - 1];
@@ -545,7 +525,6 @@ async function sendPrompt(text) {
   };
   const markVisible = () => {
     gotVisibleResponse = true;
-    clearTimeout(timeout);
   };
   try {
     const res = await fetch("/api/prompt", {
@@ -554,7 +533,7 @@ async function sendPrompt(text) {
       body: JSON.stringify({ text }),
       signal: controller.signal,
     });
-    if (!res.ok || !res.body) throw new Error(`Request failed: ${res.status}`);
+    if (!res.ok || !res.body) throw await responseError(res);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
@@ -570,7 +549,6 @@ async function sendPrompt(text) {
         try {
           evt = JSON.parse(line);
         } catch (err) {
-          console.warn("Invalid stream event:", line, err);
           continue;
         }
         lastStreamEventAt = Date.now();
@@ -613,7 +591,6 @@ async function sendPrompt(text) {
       : (state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err)));
     if (disconnected) markBackendOffline();
   } finally {
-    clearTimeout(timeout);
     clearInterval(progressInterval);
     state.streaming = false;
     state.abortController = null;
