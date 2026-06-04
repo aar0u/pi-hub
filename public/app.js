@@ -5,7 +5,7 @@ import { $, compactText, formatDuration, icon, setIcon } from "./ui.js";
 
 installApiTokenFromHash();
 
-const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], inspector: null };
+const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], inspector: null, statusFlashToken: null };
 
 const BACKEND_CHECK_INTERVAL_MS = 5_000;
 
@@ -64,9 +64,8 @@ function shouldShowTreeItem(item) {
 
 function treeItemText(item) {
   if (item.type !== "message" || !item.message) return item.type || "entry";
-  const role = item.message.role || "assistant";
   const text = textOfTreeContent(item.message.content) || item.message.errorMessage || item.message.toolName || "";
-  return `${role}: ${text}`.replace(/\s+/g, " ").trim();
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function canCollapse(m) {
@@ -85,8 +84,33 @@ function assistantTurnSummary(messages) {
   return compactText(text);
 }
 
+function messageErrorDetail(m) {
+  if (!m) return "";
+  if (!m.errorDetail && !m.error && !m.isError) return "";
+  return compactText(m.errorDetail || m.error || "Error");
+}
+
+function assistantTurnErrorDetail(messages) {
+  return messageErrorDetail(messages.find((m) => m.role === "assistant" && messageErrorDetail(m)));
+}
+
+function setHeaderDetail(head, detail) {
+  const text = compactText(detail);
+  if (!text) return;
+  const existing = head.querySelector(".msg-summary, .msg-detail");
+  const detailEl = existing || document.createElement("span");
+  detailEl.className = "msg-detail";
+  detailEl.textContent = text;
+  if (!existing) head.insertBefore(detailEl, head.children[1] || null);
+}
+
 function focusPrompt() {
   $("prompt")?.focus();
+}
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 }
 
 function insertPromptText(text, replace = false) {
@@ -112,7 +136,7 @@ function setStreamingUi(streaming) {
 function abortPrompt() {
   if (!state.streaming || !state.abortController) return;
   state.abortRequested = true;
-  $("status").textContent = "Aborting…";
+  setStatus("Aborting…", "warning", { busy: true });
   state.abortController.abort();
 }
 
@@ -133,6 +157,7 @@ function renderState(data, opts = {}) {
   chat.innerHTML = "";
   if (data.turns) renderChatTurns(data.turns, chat);
   else renderMessageRuns(data.messages || [], chat);
+  updateResponsesFoldToggle();
   if (opts.preserveScroll) {
     chat.scrollTop = prevScrollTop + (chat.scrollHeight - prevScrollHeight);
   } else {
@@ -205,8 +230,9 @@ function turnParts(messages) {
   for (const m of messages) {
     const text = messageText(m);
     if (m.role === "assistant") {
+      const detail = messageErrorDetail(m);
       for (const part of splitAssistantParts(text)) {
-        part.error = part.error || Boolean(m.error || m.isError);
+        part.error = part.error || Boolean(detail);
         parts.push(part);
         if (part.type === "tool") pendingTools.push(part);
       }
@@ -216,10 +242,33 @@ function turnParts(messages) {
     const part = pendingTools.shift() || { type: "tool", name: m.toolName || m.role || "tool", call: "", results: [], error: false };
     if (!parts.includes(part)) parts.push(part);
     part.name = m.toolName || part.name;
-    part.error = part.error || Boolean(m.error || m.isError);
+    part.error = part.error || Boolean(messageErrorDetail(m));
     part.results.push(text || m.error || "(no output)");
   }
   return parts;
+}
+
+function setMessageCollapsed(el, collapsed) {
+  el.classList.toggle("collapsed", collapsed);
+  const indicator = el.firstElementChild?.querySelector(".collapse-indicator");
+  if (indicator) setIcon(indicator, collapsed ? "chevron-down" : "chevron-up");
+}
+
+function updateResponsesFoldToggle() {
+  const button = $("responsesFoldToggle");
+  const responses = [...$("chat").querySelectorAll(".msg.assistant")];
+  const canFold = responses.some((el) => !el.classList.contains("collapsed"));
+  button.disabled = !responses.length;
+  button.textContent = canFold || !responses.length ? "Fold" : "Unfold";
+  button.title = canFold || !responses.length ? "Fold all responses" : "Unfold all responses";
+}
+
+function toggleAllResponses() {
+  const responses = [...$("chat").querySelectorAll(".msg.assistant")];
+  if (!responses.length) return;
+  const collapse = responses.some((el) => !el.classList.contains("collapsed"));
+  for (const el of responses) setMessageCollapsed(el, collapse);
+  updateResponsesFoldToggle();
 }
 
 function addMessageAction(target, kind, label, iconName, onClick) {
@@ -251,8 +300,9 @@ function addAssistantTurnFromParts(turn, opts = {}) {
   const role = document.createElement("span");
   role.textContent = "assistant";
   const summaryText = document.createElement("span");
-  summaryText.className = "msg-summary";
-  summaryText.textContent = compactText((turn.parts || []).map((part) => part.type === "text" ? part.text : `tool: ${part.name}`).join(" "));
+  const detail = turn.errorDetail || turn.detail || "";
+  summaryText.className = detail ? "msg-detail" : "msg-summary";
+  summaryText.textContent = detail ? compactText(detail) : compactText((turn.parts || []).map((part) => part.type === "text" ? part.text : `tool: ${part.name}`).join(" "));
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   const indicator = document.createElement("span");
@@ -261,8 +311,8 @@ function addAssistantTurnFromParts(turn, opts = {}) {
   head.append(role, summaryText, spacer, indicator);
   head.title = "Collapse/expand";
   head.onclick = () => {
-    el.classList.toggle("collapsed");
-    setIcon(indicator, el.classList.contains("collapsed") ? "chevron-down" : "chevron-up");
+    setMessageCollapsed(el, !el.classList.contains("collapsed"));
+    updateResponsesFoldToggle();
   };
 
   const body = document.createElement("div");
@@ -306,7 +356,7 @@ function addAssistantTurnFromParts(turn, opts = {}) {
 function addAssistantTurn(messages, opts = {}) {
   const target = opts.container || $("chat");
   const el = document.createElement("article");
-  el.className = `msg assistant turn ${messages.some((m) => m.role === "assistant" && (m.error || m.isError)) ? "error" : ""}`;
+  el.className = `msg assistant turn ${assistantTurnErrorDetail(messages) ? "error" : ""}`;
   const ids = messages.map((m) => m.id).filter(Boolean);
   if (ids.length) {
     el.dataset.id = ids[ids.length - 1];
@@ -317,8 +367,9 @@ function addAssistantTurn(messages, opts = {}) {
   const role = document.createElement("span");
   role.textContent = "assistant";
   const summaryText = document.createElement("span");
-  summaryText.className = "msg-summary";
-  summaryText.textContent = assistantTurnSummary(messages);
+  const detail = assistantTurnErrorDetail(messages);
+  summaryText.className = detail ? "msg-detail" : "msg-summary";
+  summaryText.textContent = detail || assistantTurnSummary(messages);
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   const indicator = document.createElement("span");
@@ -327,8 +378,8 @@ function addAssistantTurn(messages, opts = {}) {
   head.append(role, summaryText, spacer, indicator);
   head.title = "Collapse/expand";
   head.onclick = () => {
-    el.classList.toggle("collapsed");
-    setIcon(indicator, el.classList.contains("collapsed") ? "chevron-down" : "chevron-up");
+    setMessageCollapsed(el, !el.classList.contains("collapsed"));
+    updateResponsesFoldToggle();
   };
 
   const body = document.createElement("div");
@@ -377,8 +428,9 @@ function addMessage(m, opts = {}) {
   const role = document.createElement("span");
   role.textContent = m.toolName ? `${m.role || "tool"}: ${m.toolName}` : (m.role || "assistant");
   const summaryText = document.createElement("span");
-  summaryText.className = "msg-summary";
-  summaryText.textContent = messageSummary(m);
+  const detail = messageErrorDetail(m);
+  summaryText.className = detail ? "msg-detail" : "msg-summary";
+  summaryText.textContent = detail || messageSummary(m);
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   head.append(role, summaryText, spacer);
@@ -392,8 +444,8 @@ function addMessage(m, opts = {}) {
     head.title = "Collapse/expand";
     head.onclick = (ev) => {
       if (ev.target.closest("button")) return;
-      el.classList.toggle("collapsed");
-      setIcon(indicator, el.classList.contains("collapsed") ? "chevron-down" : "chevron-up");
+      setMessageCollapsed(el, !el.classList.contains("collapsed"));
+      updateResponsesFoldToggle();
     };
   }
   const body = document.createElement("div");
@@ -409,7 +461,10 @@ function addMessage(m, opts = {}) {
   target.append(el);
   if (m.role === "user" && m.id) addMessageAction(target, "user", "Edit from here", "navigate", () => doEditHere(m.id));
   if (m.role === "assistant" && m.id) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(m.id));
-  if (target === $("chat")) scrollChatToBottom();
+  if (target === $("chat")) {
+    updateResponsesFoldToggle();
+    scrollChatToBottom();
+  }
   return { el, head, body };
 }
 
@@ -417,10 +472,27 @@ function errorMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
+const STATUS_CLASSES = ["status-busy", "status-flash", "status-notice", "status-warning", "status-error"];
+
+function clearStatusTone() {
+  state.statusFlashToken = null;
+  $("status").classList.remove(...STATUS_CLASSES);
+}
+
+function setStatus(message, kind = "notice", opts = {}) {
+  const status = $("status");
+  const tone = `status-${kind}`;
+  state.statusFlashToken = null;
+  status.textContent = message;
+  status.classList.remove(...STATUS_CLASSES);
+  status.classList.add(tone);
+  if (opts.busy) status.classList.add("status-busy");
+}
+
 function markBackendOffline() {
   state.backendOffline = true;
+  setStatus(BACKEND_OFFLINE_MESSAGE, "error");
   $("status").classList.add("backend-offline");
-  $("status").textContent = BACKEND_OFFLINE_MESSAGE;
 }
 
 async function checkBackend() {
@@ -434,59 +506,91 @@ async function checkBackend() {
   }
 }
 
-async function runAction(action) {
+async function runAction(action, message = "Working…") {
+  setStatus(message, "warning", { busy: true });
   try {
     await action();
   } catch (err) {
-    $("status").textContent = errorMessage(err);
+    flashStatus(errorMessage(err), "error");
+  } finally {
+    $("status").classList.remove("status-busy");
+    if ($("status").textContent === message) {
+      if (state.data) updateChrome(state.data);
+      else clearStatusTone();
+    }
   }
 }
 
 function flashStatus(message, kind = "notice") {
+  setStatus(message, kind);
   const status = $("status");
-  const className = kind === "error" ? "status-error" : "status-flash";
-  status.textContent = message;
-  status.classList.remove("status-flash", "status-error");
+  const token = Symbol("status-flash");
+  state.statusFlashToken = token;
   void status.offsetWidth;
-  status.classList.add(className);
-  setTimeout(() => status.classList.remove(className), 1100);
+  status.classList.add("status-flash");
+  setTimeout(() => {
+    if (state.statusFlashToken !== token) return;
+    status.classList.remove("status-flash", `status-${kind}`);
+    state.statusFlashToken = null;
+  }, 1100);
 }
 
 function locateMessage(entryId) {
-  if (!entryId) return;
+  if (!entryId) return false;
   const chat = $("chat");
   const target = chat.querySelector(`[data-id="${CSS.escape(entryId)}"], [data-ids~="${CSS.escape(entryId)}"]`);
   chat.querySelectorAll(".located").forEach((el) => el.classList.remove("located"));
-  if (!target) {
-    flashStatus("Tree node is outside the active chat branch. Use Edit/Fork from a visible message to change branch/session.", "error");
-    return;
-  }
+  if (!target) return false;
   target.classList.add("located");
   target.scrollIntoView({ block: "start", behavior: "smooth" });
   setTimeout(() => target.classList.remove("located"), 1600);
+  return true;
+}
+
+function locateTreeItem(item) {
+  if (!item?.id) return;
+  if (item.active && locateMessage(item.id)) return;
+  flashStatus("This tree node is off the active chat path. Use Fork to open it without rewinding the current session.", "warning");
 }
 
 function treeNodeButton(item) {
+  const row = document.createElement("div");
+  row.className = "tree-row";
+
   const node = document.createElement("button");
   const textValue = treeItemText(item);
   node.type = "button";
   node.className = `tree-node ${item.active ? "active" : "off-branch"} ${item.current ? "current" : ""}`;
   node.title = textValue || item.id;
-  node.onclick = () => locateMessage(item.id);
+  node.onclick = () => locateTreeItem(item);
   const marker = document.createElement("span");
-  marker.className = "tree-marker";
-  marker.textContent = item.current ? "●" : (item.active ? "•" : "○");
+  marker.className = `tree-marker ${item.message?.role || "entry"}`;
+  marker.title = item.message?.role || item.type || "entry";
+  marker.textContent = item.current ? "●" : (item.message?.role === "user" ? "→" : "");
   const text = document.createElement("span");
   text.className = "tree-text";
   text.textContent = textValue || item.id;
-  const role = document.createElement("span");
-  role.className = "tree-role";
-  role.textContent = item.message?.role || item.type;
   const id = document.createElement("span");
   id.className = "tree-id";
   id.textContent = item.id;
-  node.append(marker, text, role, id);
-  return node;
+  node.append(marker, text, id);
+  row.append(node);
+
+  if (item.message?.role === "assistant") {
+    const actions = document.createElement("span");
+    actions.className = "tree-actions";
+    const fork = document.createElement("button");
+    fork.className = "tree-action";
+    fork.type = "button";
+    fork.title = "Fork from here";
+    fork.setAttribute("aria-label", "Fork from here");
+    fork.append(icon("fork"));
+    fork.onclick = () => void doFork(item.id);
+    actions.append(fork);
+    row.append(actions);
+  }
+
+  return row;
 }
 
 function hasVisibleTreeItem(item) {
@@ -559,7 +663,7 @@ function renderCwdMenu() {
     item.type = "button";
     item.textContent = cwd;
     item.title = cwd;
-    item.onclick = () => void runAction(() => switchCwd(cwd));
+    item.onclick = () => void runAction(() => switchCwd(cwd), "Switching directory…");
     menu.append(item);
   }
   menu.hidden = !state.cwdChoices.length;
@@ -660,7 +764,7 @@ async function loadSessions() {
         if (name === null) return;
         await api("/api/sessions", { method: "PATCH", body: JSON.stringify({ path: s.path, name }) });
         await refresh({ preserveScroll: true });
-      });
+      }, "Renaming session…");
     };
     const del = document.createElement("button");
     del.className = "delete icon-button";
@@ -673,21 +777,18 @@ async function loadSessions() {
         if (!confirm("Delete this session?")) return;
         await api(`/api/sessions?path=${encodeURIComponent(s.path)}`, { method: "DELETE" });
         await refresh();
-      });
+      }, "Deleting session…");
     };
     actions.append(rename, del);
     row.append(main, actions);
-    row.onclick = () => void runAction(async () => { renderState(await api("/api/sessions/open", { method: "POST", body: JSON.stringify({ path: s.path }) })); await updateSidebarData(); });
+    row.onclick = () => void runAction(async () => {
+      const previousCwd = state.data?.cwd;
+      const data = await api("/api/sessions/open", { method: "POST", body: JSON.stringify({ path: s.path }) });
+      renderState(data);
+      await updateSidebarData({ loadFiles: previousCwd !== data.cwd });
+    }, "Opening session…");
     box.append(row);
   }
-}
-
-function formatSessionPath(path) {
-  if (!path) return { name: "", parent: "" };
-  const parts = path.split(/[/\\]/);
-  const name = parts[parts.length - 1] || "";
-  const parent = parts[parts.length - 2] || "";
-  return { name, parent };
 }
 
 function updateChrome(data) {
@@ -695,14 +796,16 @@ function updateChrome(data) {
   state.data = data;
   if (previousCwd !== data.cwd) state.filePath = ".";
   $("cwd").value = data.cwd || "";
-  const { name, parent } = formatSessionPath(data.sessionFile);
   $("status").classList.remove("backend-offline");
-  $("status").textContent = data.sessionName || (parent ? `${parent}/${name}` : name || "new session");
+  clearStatusTone();
+  $("status").textContent = data.sessionId || "new session";
   updateInspectorPanel(data);
 }
 
-async function updateSidebarData() {
-  await Promise.all([loadSessions(), loadCwdOptions(), loadFiles()]);
+async function updateSidebarData(opts = {}) {
+  const tasks = [loadSessions(), loadCwdOptions()];
+  if (opts.loadFiles !== false) tasks.push(loadFiles());
+  await Promise.all(tasks);
 }
 
 async function refresh(opts = {}) {
@@ -722,7 +825,7 @@ async function sessionAction(endpoint, entryId) {
     await updateSidebarData();
     return data;
   } catch (err) {
-    $("status").textContent = errorMessage(err);
+    flashStatus(errorMessage(err), "error");
     await refresh();
     return null;
   }
@@ -760,13 +863,13 @@ async function sendPrompt(text) {
       assistant.body.textContent = `waiting… (${elapsed}s)`;
       if (idleMs > STREAM_AWARENESS_TIMEOUT_MS && !streamWarningShown) {
         streamWarningShown = true;
-        $("status").textContent = `No visible response for ${formatDuration(idleMs)}; still waiting.`;
+        setStatus(`No visible response for ${formatDuration(idleMs)}; still waiting.`, "warning");
       }
       return;
     }
     if (activeToolPart && activeToolPart.phase !== "done") renderAssistant();
     if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
-      $("status").textContent = `No stream updates for ${formatDuration(idleMs)}; backend/tool may be stuck.`;
+      setStatus(`No stream updates for ${formatDuration(idleMs)}; backend/tool may be stuck.`, "warning");
     }
   }, 1000);
   const appendTextDelta = (delta) => {
@@ -780,8 +883,8 @@ async function sendPrompt(text) {
   };
   const appendToolEvent = (evt) => {
     const name = evt.toolName || activeToolPart?.name || "tool";
-    if (evt.phase === "done") $("status").textContent = `${name} done`;
-    else $("status").textContent = `Running ${name}…`;
+    if (evt.phase === "done") flashStatus(`${name} done`);
+    else setStatus(`Running ${name}…`, "warning", { busy: true });
     if (!activeToolPart || activeToolPart.phase === "done") {
       activeToolPart = { type: "tool", name, phase: evt.phase || "running", startedAt: Date.now(), endedAt: null, command: "", messages: [], error: false };
       streamParts.push(activeToolPart);
@@ -860,6 +963,7 @@ async function sendPrompt(text) {
         markVisible();
         assistant.el.classList.add("error");
         assistant.body.textContent = evt.message || "Unknown error";
+        setHeaderDetail(assistant.head, assistant.body.textContent);
         if (evt.state) {
           latestPromptState = evt.state;
           state.data = evt.state;
@@ -874,11 +978,13 @@ async function sendPrompt(text) {
     if (!gotVisibleResponse && !output) {
       assistant.el.classList.add("error");
       assistant.body.textContent = "No response content received.";
+      setHeaderDetail(assistant.head, assistant.body.textContent);
     }
   } catch (err) {
     assistant.el.classList.add("error");
     const disconnected = !state.abortRequested && isNetworkError(err);
     assistant.body.textContent = state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err));
+    setHeaderDetail(assistant.head, assistant.body.textContent);
     if (disconnected) markBackendOffline();
   } finally {
     clearInterval(progressInterval);
@@ -918,6 +1024,12 @@ $("prompt").addEventListener("keydown", (ev) => {
     $("promptForm").requestSubmit();
   }
 });
+document.addEventListener("keydown", (ev) => {
+  const isFocusShortcut = ev.key === "/" && (ev.metaKey || ev.ctrlKey) && !ev.altKey;
+  if (!isFocusShortcut || isEditableTarget(ev.target)) return;
+  ev.preventDefault();
+  focusPrompt();
+});
 async function switchCwd(nextCwd) {
   if (!nextCwd) return;
   $("cwdMenu").hidden = true;
@@ -927,12 +1039,12 @@ async function switchCwd(nextCwd) {
 
 $("cwdForm").onsubmit = (ev) => {
   ev.preventDefault();
-  void runAction(() => switchCwd($("cwd").value));
+  void runAction(() => switchCwd($("cwd").value), "Switching directory…");
 };
 $("cwd").onfocus = renderCwdMenu;
 $("cwd").onblur = hideCwdMenuSoon;
 $("cwd").oninput = renderCwdMenu;
-$("newSession").onclick = () => void runAction(async () => { renderState(await api("/api/sessions/new", { method: "POST" })); await updateSidebarData(); focusPrompt(); });
+$("newSession").onclick = () => void runAction(async () => { renderState(await api("/api/sessions/new", { method: "POST" })); await updateSidebarData(); focusPrompt(); }, "Creating session…");
 function closeInspector() {
   const panel = $("systemPanel");
   state.inspector = null;
@@ -955,14 +1067,15 @@ function toggleInspector(kind) {
   updateInspectorPanel();
 }
 
+$("responsesFoldToggle").onclick = toggleAllResponses;
 $("systemToggle").onclick = () => toggleInspector("system");
 $("treeToggle").onclick = () => toggleInspector("tree");
 document.addEventListener("click", (ev) => {
   if ($("systemPanel").hidden) return;
-  if (ev.target.closest("#systemPanel, #systemToggle, #treeToggle")) return;
+  if (ev.target.closest("#systemPanel, #responsesFoldToggle, #systemToggle, #treeToggle")) return;
   closeInspector();
 });
 
 setInterval(() => void checkBackend(), BACKEND_CHECK_INTERVAL_MS);
 
-refresh().then(focusPrompt).catch((err) => { $("status").textContent = errorMessage(err); focusPrompt(); });
+refresh().catch((err) => { flashStatus(errorMessage(err), "error"); });

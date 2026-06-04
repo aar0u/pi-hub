@@ -66,13 +66,21 @@ function contentParts(content) {
   return parts;
 }
 
+function problemStopReason(reason) {
+  return typeof reason === "string" && /abort|cancel|error|fail/i.test(reason);
+}
+
+function messageErrorDetail(message) {
+  return message.errorMessage || (problemStopReason(message.stopReason) ? message.stopReason : "") || (message.isError ? "Error" : "");
+}
+
 function chatTurns(entries, toMessage) {
   const turns = [];
   let assistant = null;
   const pendingTools = [];
   const ensureAssistant = () => {
     if (!assistant) {
-      assistant = { role: "assistant", ids: [], parts: [], error: false };
+      assistant = { role: "assistant", ids: [], parts: [], error: false, errorDetail: "" };
       turns.push(assistant);
     }
     return assistant;
@@ -95,9 +103,11 @@ function chatTurns(entries, toMessage) {
     const turn = ensureAssistant();
     turn.ids.push(entry.id);
     if (message.role === "assistant") {
-      turn.error = turn.error || Boolean(message.errorMessage || message.isError);
+      const detail = messageErrorDetail(message);
+      turn.error = turn.error || Boolean(detail);
+      if (detail && !turn.errorDetail) turn.errorDetail = detail;
       for (const part of contentParts(message.content)) {
-        part.error = part.error || Boolean(message.errorMessage || message.isError);
+        part.error = part.error || Boolean(detail);
         turn.parts.push(part);
         if (part.type === "tool") pendingTools.push(part);
       }
@@ -108,7 +118,8 @@ function chatTurns(entries, toMessage) {
     const part = pendingTools.shift() || { type: "tool", name: message.toolName || message.role || "tool", call: "", results: [], error: false };
     if (!turn.parts.includes(part)) turn.parts.push(part);
     part.name = message.toolName || part.name;
-    part.error = part.error || Boolean(message.errorMessage || message.isError);
+    const detail = messageErrorDetail(message);
+    part.error = part.error || Boolean(detail);
     part.results.push(textOfContent(message.content) || message.errorMessage || "(no output)");
   }
 
@@ -132,6 +143,7 @@ export function sessionPayload(runtime) {
     role: entry.message?.role ?? "assistant",
     text: textOfContent(entry.message?.content),
     error: entry.message?.errorMessage,
+    errorDetail: messageErrorDetail(entry.message ?? {}),
     stopReason: entry.message?.stopReason,
     toolName: entry.message?.toolName,
     isError: entry.message?.isError,

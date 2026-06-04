@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.mjs",
-    "build": "node --check src/*.mjs src/routes/*.mjs public/*.js",
-    "start": "node src/server.mjs"
+    "build": "node --check src/*.mjs src/routes/*.mjs public/*.js scripts/*.mjs && pnpm vendor:check && node scripts/check-markdown-safety.mjs",
+    "start": "node src/server.mjs",
+    "vendor:update": "node scripts/update-vendor.mjs",
+    "vendor:check": "node scripts/check-vendor.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.75.5"
+    "@earendil-works/pi-coding-agent": "0.75.5",
+    "marked": "18.0.4",
+    "prismjs": "1.30.0"
   },
   "engines": {
     "node": ">=22.19.0"

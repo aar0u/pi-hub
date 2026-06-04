@@ -5,8 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>pi web</title>
   <link rel="stylesheet" href="/style.css" />
-  <link rel="stylesheet" href="/vendor/highlight.css" />
-  <script src="/vendor/highlight.min.js"></script>
+  <script src="/vendor/prism.js"></script>
+  <script src="/vendor/prism-bash.min.js"></script>
+  <script src="/vendor/prism-python.min.js"></script>
+  <script src="/vendor/prism-json.min.js"></script>
+  <script src="/vendor/prism-typescript.min.js"></script>
+  <script src="/vendor/prism-jsx.min.js"></script>
+  <script src="/vendor/prism-tsx.min.js"></script>
+  <script src="/vendor/prism-diff.min.js"></script>
+  <script src="/vendor/prism-yaml.min.js"></script>
+  <script src="/vendor/prism-markdown.min.js"></script>
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -40,13 +48,14 @@
   <main>
     <div class="topbar">
       <div id="status" class="status"></div>
+      <button id="responsesFoldToggle" class="inspector-toggle" type="button" title="Fold/unfold all responses">Fold</button>
       <button id="treeToggle" class="inspector-toggle" type="button">Tree</button>
       <button id="systemToggle" class="inspector-toggle" type="button">System</button>
     </div>
     <div id="systemPanel" class="inspector-panel" hidden></div>
     <section id="chat" class="chat"></section>
     <form id="promptForm" class="composer">
-      <textarea id="prompt" rows="3" placeholder="Request… Enter sends, Shift+Enter newline"></textarea>
+      <textarea id="prompt" rows="3" placeholder="Request… Ctrl+/ focuses, Enter sends, Shift+Enter newline"></textarea>
       <button id="send" class="icon-button" title="Send" aria-label="Send"><svg class="icon"><use href="#icon-send"></use></svg></button>
     </form>
   </main>
