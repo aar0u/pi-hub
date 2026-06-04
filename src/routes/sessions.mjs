@@ -9,7 +9,7 @@ export function registerSessionsRoutes(apiRoutes, context) {
   });
 
   apiRoutes.set("GET /api/cwds", async (_req, res, _url) => {
-    sendJson(res, await listCwds());
+    sendJson(res, await listCwds([context.getRuntime().cwd]));
   });
 
   apiRoutes.set("POST /api/sessions/new", async (_req, res, _url) => {

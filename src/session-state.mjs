@@ -32,6 +32,24 @@ function systemPromptOf(session) {
   return state && "systemPrompt" in state ? (state.systemPrompt ?? "") : null;
 }
 
+function safeSessionStats(session) {
+  try {
+    return session.getSessionStats?.() ?? null;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function modelPayload(model) {
+  if (!model) return null;
+  return {
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    contextWindow: model.contextWindow,
+  };
+}
+
 function treeItems(roots, activeLeafId, activeIds) {
   const itemOf = (node) => {
     const entry = node.entry;
@@ -158,6 +176,9 @@ export function sessionPayload(runtime) {
     sessionName: sm.getSessionName?.(),
     leafId: activeLeafId,
     isStreaming: session.isStreaming,
+    model: modelPayload(session.model),
+    thinkingLevel: session.thinkingLevel,
+    stats: safeSessionStats(session),
     systemPrompt: systemPromptOf(session),
     messages: activeEntries.map((entry) => toMessage(entry)),
     turns: chatTurns(activeEntries, toMessage),

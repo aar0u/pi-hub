@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.mjs",
-    "build": "node --check src/*.mjs src/routes/*.mjs public/*.js scripts/*.mjs && pnpm vendor:check && node scripts/check-markdown-safety.mjs",
+    "build": "node scripts/check-syntax.mjs && pnpm vendor:check && node scripts/check-markdown-safety.mjs",
     "start": "node src/server.mjs",
     "vendor:update": "node scripts/update-vendor.mjs",
     "vendor:check": "node scripts/check-vendor.mjs"

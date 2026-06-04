@@ -1,11 +1,15 @@
 import { BACKEND_OFFLINE_MESSAGE, api, isNetworkError, responseError } from "./api.js";
 import { renderMarkdown } from "./markdown.js";
 import { apiAuthHeaders, installApiTokenFromHash, readNdjsonStream, STREAM_AWARENESS_TIMEOUT_MS } from "./stream.js";
+import { createFileSidebar } from "./sidebar-files.js";
+import { createSessionSidebar } from "./sidebar-sessions.js";
 import { $, compactText, formatDuration, icon, setIcon } from "./ui.js";
 
 installApiTokenFromHash();
 
-const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], inspector: null, statusFlashToken: null };
+const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], slashCommands: [], slashIndex: 0, inspector: null, statusFlashToken: null };
+let loadFiles;
+let loadSessions;
 
 const BACKEND_CHECK_INTERVAL_MS = 5_000;
 
@@ -348,7 +352,7 @@ function addAssistantTurnFromParts(turn, opts = {}) {
   el.append(head, body);
   target.append(el);
   const forkEntry = ids[ids.length - 1];
-  if (forkEntry) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
+  if (forkEntry) addMessageAction(el, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
   if (target === $("chat")) scrollChatToBottom();
   return { el, body };
 }
@@ -413,7 +417,7 @@ function addAssistantTurn(messages, opts = {}) {
   el.append(head, body);
   target.append(el);
   const forkEntry = [...messages].reverse().find((m) => m.id)?.id;
-  if (forkEntry) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
+  if (forkEntry) addMessageAction(el, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
   if (target === $("chat")) scrollChatToBottom();
   return { el, body };
 }
@@ -459,8 +463,8 @@ function addMessage(m, opts = {}) {
   }
   el.append(head, body);
   target.append(el);
-  if (m.role === "user" && m.id) addMessageAction(target, "user", "Edit from here", "navigate", () => doEditHere(m.id));
-  if (m.role === "assistant" && m.id) addMessageAction(target, "assistant", "Fork from here", "fork", () => doFork(m.id));
+  if (m.role === "user" && m.id) addMessageAction(el, "user", "Edit from here", "navigate", () => doEditHere(m.id));
+  if (m.role === "assistant" && m.id) addMessageAction(el, "assistant", "Fork from here", "fork", () => doFork(m.id));
   if (target === $("chat")) {
     updateResponsesFoldToggle();
     scrollChatToBottom();
@@ -470,6 +474,56 @@ function addMessage(m, opts = {}) {
 
 function errorMessage(err) {
   return err instanceof Error ? err.message : String(err);
+}
+
+function formatCount(value) {
+  if (!Number.isFinite(value)) return "?";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(value);
+}
+
+function formatCost(value) {
+  return Number.isFinite(value) && value > 0 ? `$${value.toFixed(value < 0.01 ? 4 : 2)}` : "";
+}
+
+function contextStatusText(contextUsage) {
+  if (!contextUsage) return "context ?";
+  const windowText = formatCount(contextUsage.contextWindow);
+  if (contextUsage.tokens === null || contextUsage.tokens === undefined) return `context ?/${windowText}`;
+  const percent = Number.isFinite(contextUsage.percent) ? ` ${Math.round(contextUsage.percent)}%` : "";
+  return `context ${formatCount(contextUsage.tokens)}/${windowText}${percent}`;
+}
+
+function updatePromptStatus(data = state.data) {
+  const status = $("promptStatus");
+  if (!status) return;
+  status.innerHTML = "";
+  if (!data) return;
+
+  const addItem = (kind, text, title = text) => {
+    if (!text) return;
+    const item = document.createElement("span");
+    item.className = `composer-status-item ${kind}`;
+    item.textContent = text;
+    item.title = title;
+    status.append(item);
+  };
+
+  const stats = data.stats || {};
+  const tokens = stats.tokens || {};
+  const contextUsage = stats.contextUsage || (data.model?.contextWindow ? { tokens: null, contextWindow: data.model.contextWindow, percent: null } : null);
+  addItem("model", data.model?.id || data.model?.name || "model ?", data.model?.provider ? `${data.model.provider}: ${data.model.id}` : undefined);
+  addItem("context", contextStatusText(contextUsage));
+  addItem("messages", `${stats.totalMessages ?? (data.messages?.length ?? 0)} msg`);
+
+  const tokenText = [tokens.input ? `in ${formatCount(tokens.input)}` : "", tokens.output ? `out ${formatCount(tokens.output)}` : "", tokens.cacheRead ? `cache ${formatCount(tokens.cacheRead)}` : ""].filter(Boolean).join(" / ");
+  addItem("tokens", tokenText);
+  addItem("cost", formatCost(stats.cost));
+  if (data.thinkingLevel && data.thinkingLevel !== "off") addItem("thinking", `thinking ${data.thinkingLevel}`);
+  addItem("error", stats.error ? `stats error` : "", stats.error);
+
+  status.title = [...status.children].map((el) => el.title || el.textContent).filter(Boolean).join(" · ");
 }
 
 const STATUS_CLASSES = ["status-busy", "status-flash", "status-notice", "status-warning", "status-error"];
@@ -682,113 +736,81 @@ async function loadCwdOptions() {
   if (!$("cwdMenu")?.hidden) renderCwdMenu();
 }
 
-async function loadFiles(path = state.filePath) {
-  const box = $("files");
-  if (!box || !state.data?.cwd) return;
-  box.textContent = "Loading…";
-  box.className = "files file-empty";
-  try {
-    const data = await api(`/api/files?path=${encodeURIComponent(path || ".")}`);
-    state.filePath = data.relativePath || ".";
-    box.className = "files";
-    box.innerHTML = "";
-    if (data.parentPath) {
-      const up = document.createElement("button");
-      up.className = "file-row";
-      up.innerHTML = `<span class="file-name">../</span><span></span>`;
-      up.onclick = () => void loadFiles(data.parentPath);
-      box.append(up);
-    }
-    for (const entry of data.entries || []) {
-      const row = document.createElement("button");
-      row.className = "file-row";
-      const name = document.createElement("span");
-      name.className = "file-name";
-      name.textContent = `${entry.isDir ? "▸ " : ""}${entry.name}`;
-      name.title = entry.relativePath;
-      const mention = document.createElement("span");
-      mention.className = "file-mention";
-      mention.textContent = "@";
-      row.append(name, mention);
-      row.onclick = () => entry.isDir ? void loadFiles(entry.path) : insertPromptText(`\`${entry.relativePath}\``);
-      mention.onclick = (ev) => {
-        ev.stopPropagation();
-        insertPromptText(`\`${entry.relativePath}\``);
-      };
-      box.append(row);
-    }
-    if (!box.childElementCount) {
-      box.className = "files file-empty";
-      box.textContent = "empty";
-    }
-  } catch (err) {
-    box.className = "files file-empty";
-    box.textContent = errorMessage(err);
-  }
+async function loadSlashCommands() {
+  state.slashCommands = await api("/api/commands");
+  renderSlashMenu();
 }
 
-async function loadSessions() {
-  const sessions = await api("/api/sessions");
-  const box = $("sessions");
-  box.innerHTML = "";
-  const activeSessionPath = state.data?.sessionFile;
-  for (const s of sessions) {
-    const row = document.createElement("button");
-    const isActive = activeSessionPath && s.path === activeSessionPath;
-    row.className = `session ${isActive ? "selected" : ""}`;
-    if (isActive) row.setAttribute("aria-current", "true");
-    row.title = s.firstMessage || s.path;
-    const main = document.createElement("span");
-    main.className = "session-main";
-    const title = document.createElement("div");
-    title.className = "session-title";
-    title.textContent = s.name || s.firstMessage || "(empty session)";
-    const meta = document.createElement("div");
-    meta.className = "session-meta";
-    meta.textContent = `${s.messageCount} msg · ${new Date(s.modified).toLocaleString()}`;
-    const cwd = document.createElement("div");
-    cwd.className = "session-cwd";
-    cwd.textContent = s.cwd || "";
-    main.append(title, meta, cwd);
-    const actions = document.createElement("span");
-    actions.className = "session-actions";
-    const rename = document.createElement("button");
-    rename.className = "rename icon-button";
-    rename.title = "Rename session";
-    rename.setAttribute("aria-label", "Rename session");
-    rename.textContent = "✎";
-    rename.onclick = (ev) => {
-      ev.stopPropagation();
-      void runAction(async () => {
-        const name = prompt("Session name", s.name || "");
-        if (name === null) return;
-        await api("/api/sessions", { method: "PATCH", body: JSON.stringify({ path: s.path, name }) });
-        await refresh({ preserveScroll: true });
-      }, "Renaming session…");
-    };
-    const del = document.createElement("button");
-    del.className = "delete icon-button";
-    del.title = "Delete session";
-    del.setAttribute("aria-label", "Delete session");
-    del.append(icon("trash"));
-    del.onclick = (ev) => {
-      ev.stopPropagation();
-      void runAction(async () => {
-        if (!confirm("Delete this session?")) return;
-        await api(`/api/sessions?path=${encodeURIComponent(s.path)}`, { method: "DELETE" });
-        await refresh();
-      }, "Deleting session…");
-    };
-    actions.append(rename, del);
-    row.append(main, actions);
-    row.onclick = () => void runAction(async () => {
-      const previousCwd = state.data?.cwd;
-      const data = await api("/api/sessions/open", { method: "POST", body: JSON.stringify({ path: s.path }) });
-      renderState(data);
-      await updateSidebarData({ loadFiles: previousCwd !== data.cwd });
-    }, "Opening session…");
-    box.append(row);
+function slashQuery() {
+  const prompt = $("prompt");
+  const beforeCursor = prompt.value.slice(0, prompt.selectionStart ?? prompt.value.length);
+  const match = beforeCursor.match(/^\/([^\s]*)$/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function slashMatches() {
+  const query = slashQuery();
+  if (query === null) return [];
+  return state.slashCommands
+    .filter((command) => command.name.toLowerCase().includes(query))
+    .slice(0, 12);
+}
+
+function insertSlashCommand(command) {
+  const prompt = $("prompt");
+  prompt.value = `/${command.name} `;
+  prompt.focus();
+  prompt.selectionStart = prompt.selectionEnd = prompt.value.length;
+  hideSlashMenu();
+}
+
+function hideSlashMenu() {
+  const menu = $("slashMenu");
+  if (menu) menu.hidden = true;
+}
+
+function renderSlashMenu() {
+  const menu = $("slashMenu");
+  if (!menu) return;
+  const matches = slashMatches();
+  state.slashIndex = Math.min(state.slashIndex, Math.max(0, matches.length - 1));
+  menu.innerHTML = "";
+  for (const [index, command] of matches.entries()) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = index === state.slashIndex ? "active" : "";
+    item.title = command.description || command.name;
+    item.onmousedown = (ev) => ev.preventDefault();
+    item.onclick = () => insertSlashCommand(command);
+
+    const name = document.createElement("span");
+    name.className = "slash-name";
+    name.textContent = `/${command.name}`;
+
+    const desc = document.createElement("span");
+    desc.className = "slash-desc";
+    desc.textContent = command.description || "";
+
+    const source = document.createElement("span");
+    source.className = "slash-source";
+    source.textContent = command.source || "";
+
+    item.append(name, desc, source);
+    menu.append(item);
   }
+  menu.hidden = !matches.length;
+}
+
+function moveSlashSelection(delta) {
+  const matches = slashMatches();
+  if (!matches.length) return;
+  state.slashIndex = (state.slashIndex + delta + matches.length) % matches.length;
+  renderSlashMenu();
+}
+
+function acceptSlashSelection() {
+  const command = slashMatches()[state.slashIndex];
+  if (command) insertSlashCommand(command);
 }
 
 function updateChrome(data) {
@@ -799,11 +821,12 @@ function updateChrome(data) {
   $("status").classList.remove("backend-offline");
   clearStatusTone();
   $("status").textContent = data.sessionId || "new session";
+  updatePromptStatus(data);
   updateInspectorPanel(data);
 }
 
 async function updateSidebarData(opts = {}) {
-  const tasks = [loadSessions(), loadCwdOptions()];
+  const tasks = [loadSessions(), loadCwdOptions(), loadSlashCommands()];
   if (opts.loadFiles !== false) tasks.push(loadFiles());
   await Promise.all(tasks);
 }
@@ -836,6 +859,9 @@ const doEditHere = async (entryId) => {
   const data = await sessionAction("/api/navigate-tree", entryId);
   if (typeof data?.navigation?.editorText === "string") insertPromptText(data.navigation.editorText, true);
 };
+
+loadFiles = createFileSidebar({ state, api, $, errorMessage, insertPromptText });
+loadSessions = createSessionSidebar({ state, api, $, icon, runAction, refresh, renderState, updateSidebarData });
 
 async function sendPrompt(text) {
   state.streaming = true;
@@ -1013,17 +1039,35 @@ $("promptForm").onsubmit = async (ev) => {
   }
   const text = $("prompt").value.trim();
   if (!text) return;
+  hideSlashMenu();
   $("prompt").value = "";
   await sendPrompt(text);
 };
 $("prompt").addEventListener("compositionstart", () => state.composing = true);
 $("prompt").addEventListener("compositionend", () => state.composing = false);
 $("prompt").addEventListener("keydown", (ev) => {
+  if (!$("slashMenu").hidden && (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Tab")) {
+    ev.preventDefault();
+    if (ev.key === "Tab") acceptSlashSelection();
+    else moveSlashSelection(ev.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (!$("slashMenu").hidden && ev.key === "Escape") {
+    ev.preventDefault();
+    hideSlashMenu();
+    return;
+  }
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && !state.composing) {
     ev.preventDefault();
     $("promptForm").requestSubmit();
   }
 });
+$("prompt").addEventListener("input", () => {
+  state.slashIndex = 0;
+  renderSlashMenu();
+});
+$("prompt").addEventListener("click", renderSlashMenu);
+$("prompt").addEventListener("blur", () => setTimeout(hideSlashMenu, 120));
 document.addEventListener("keydown", (ev) => {
   const isFocusShortcut = ev.key === "/" && (ev.metaKey || ev.ctrlKey) && !ev.altKey;
   if (!isFocusShortcut || isEditableTarget(ev.target)) return;
@@ -1033,13 +1077,19 @@ document.addEventListener("keydown", (ev) => {
 async function switchCwd(nextCwd) {
   if (!nextCwd) return;
   $("cwdMenu").hidden = true;
-  renderState(await api("/api/cwd", { method: "POST", body: JSON.stringify({ cwd: nextCwd }) }));
+  const data = await api("/api/cwd", { method: "POST", body: JSON.stringify({ cwd: nextCwd }) });
+  renderState(data);
+  if (data.cwdCreated) flashStatus(`Created directory: ${data.cwd}`, "notice");
   await updateSidebarData();
+}
+
+function submitCwdSwitch() {
+  void runAction(() => switchCwd($("cwd").value), "Switching directory…");
 }
 
 $("cwdForm").onsubmit = (ev) => {
   ev.preventDefault();
-  void runAction(() => switchCwd($("cwd").value), "Switching directory…");
+  submitCwdSwitch();
 };
 $("cwd").onfocus = renderCwdMenu;
 $("cwd").onblur = hideCwdMenuSoon;

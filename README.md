@@ -25,7 +25,9 @@ Remote access is disabled by default. For trusted LAN-only access, bind a non-lo
 HOST=0.0.0.0 PI_WEB_ALLOW_REMOTE=1 pnpm start
 ```
 
-Then open `http://<your-lan-ip>:8787` from another device. If you need a token, also set `PI_WEB_TOKEN` and open the UI once with `#token=<token>`. Only expose pi-web on a trusted LAN or behind an authenticated proxy/tunnel.
+Then open `http://<your-lan-ip>:8787` from another device. Without `PI_WEB_TOKEN`, anyone who can reach that LAN address can use the full pi-web API, including prompting the agent, switching directories, browsing files, and managing sessions. This is intended for personal trusted-LAN use only.
+
+If you need a token, also set `PI_WEB_TOKEN` and open the UI once with `#token=<token>`. Only expose pi-web on a trusted LAN or behind an authenticated proxy/tunnel.
 
 ## Notes
 

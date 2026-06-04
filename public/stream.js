@@ -27,6 +27,14 @@ export function installApiTokenFromHash() {
   history.replaceState(null, "", `${location.pathname}${location.search}${nextHash ? `#${nextHash}` : ""}`);
 }
 
+function parseStreamEvent(line) {
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    throw new Error(`Malformed stream event: ${line.slice(0, 120)}`, { cause: error });
+  }
+}
+
 export async function readNdjsonStream(res, onEvent) {
   if (!res.body) return;
   const reader = res.body.getReader();
@@ -40,20 +48,8 @@ export async function readNdjsonStream(res, onEvent) {
     buf = lines.pop();
     for (const line of lines) {
       if (!line.trim()) continue;
-      let evt;
-      try {
-        evt = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      onEvent(evt);
+      onEvent(parseStreamEvent(line));
     }
   }
-  if (buf.trim()) {
-    try {
-      onEvent(JSON.parse(buf));
-    } catch {
-      // Ignore a partial trailing line from an interrupted stream.
-    }
-  }
+  if (buf.trim()) onEvent(parseStreamEvent(buf));
 }
