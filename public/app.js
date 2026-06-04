@@ -7,7 +7,7 @@ import { $, compactText, formatDuration, icon, setIcon } from "./ui.js";
 
 installApiTokenFromHash();
 
-const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], slashCommands: [], slashIndex: 0, inspector: null, statusFlashToken: null };
+const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], slashCommands: [], slashIndex: 0, inspector: null, status: { persistent: null, flash: null } };
 let loadFiles;
 let loadSessions;
 
@@ -128,6 +128,48 @@ function insertPromptText(text, replace = false) {
   }
   prompt.focus();
   prompt.selectionStart = prompt.selectionEnd = prompt.value.length;
+}
+
+function installComposerResize() {
+  const handle = $("composerResize");
+  const prompt = $("prompt");
+  if (!handle || !prompt) return;
+
+  const minHeight = () => Number.parseFloat(getComputedStyle(prompt).minHeight) || 84;
+  const maxHeight = () => Math.round(window.innerHeight * 0.52);
+  const setPromptHeight = (height) => {
+    const nextHeight = Math.min(maxHeight(), Math.max(minHeight(), height));
+    prompt.style.setProperty("--prompt-height", `${nextHeight}px`);
+    handle.setAttribute("aria-valuenow", String(Math.round(nextHeight)));
+  };
+
+  handle.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    handle.setPointerCapture(ev.pointerId);
+    const startY = ev.clientY;
+    const startHeight = prompt.getBoundingClientRect().height;
+
+    const resize = (moveEv) => setPromptHeight(startHeight + startY - moveEv.clientY);
+    const stop = () => {
+      handle.removeEventListener("pointermove", resize);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+    };
+
+    handle.addEventListener("pointermove", resize);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  });
+
+  handle.addEventListener("keydown", (ev) => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(ev.key)) return;
+    ev.preventDefault();
+    const currentHeight = prompt.getBoundingClientRect().height;
+    const step = ev.shiftKey ? 40 : 12;
+    if (ev.key === "Home") setPromptHeight(minHeight());
+    else if (ev.key === "End") setPromptHeight(maxHeight());
+    else setPromptHeight(currentHeight + (ev.key === "ArrowUp" ? step : -step));
+  });
 }
 
 function setStreamingUi(streaming) {
@@ -528,64 +570,74 @@ function updatePromptStatus(data = state.data) {
 
 const STATUS_CLASSES = ["status-busy", "status-flash", "status-notice", "status-warning", "status-error"];
 
-function clearStatusTone() {
-  state.statusFlashToken = null;
-  $("status").classList.remove(...STATUS_CLASSES);
+function renderStatus() {
+  const status = $("status");
+  const current = state.status.flash || state.status.persistent;
+  status.classList.remove(...STATUS_CLASSES, "backend-offline");
+  if (!current) {
+    status.textContent = state.data?.sessionId || "new session";
+    return;
+  }
+
+  status.textContent = current.message;
+  status.classList.add(`status-${current.kind || "notice"}`);
+  if (current.busy) status.classList.add("status-busy");
+  if (current.backendOffline) status.classList.add("backend-offline");
+}
+
+function clearStatus(token) {
+  if (!token || state.status.persistent?.token === token) {
+    state.status.persistent = null;
+    renderStatus();
+  }
 }
 
 function setStatus(message, kind = "notice", opts = {}) {
-  const status = $("status");
-  const tone = `status-${kind}`;
-  state.statusFlashToken = null;
-  status.textContent = message;
-  status.classList.remove(...STATUS_CLASSES);
-  status.classList.add(tone);
-  if (opts.busy) status.classList.add("status-busy");
+  const token = Symbol("status");
+  state.status.persistent = { message, kind, busy: Boolean(opts.busy), backendOffline: Boolean(opts.backendOffline), token };
+  renderStatus();
+  return token;
 }
 
 function markBackendOffline() {
   state.backendOffline = true;
-  setStatus(BACKEND_OFFLINE_MESSAGE, "error");
-  $("status").classList.add("backend-offline");
+  setStatus(BACKEND_OFFLINE_MESSAGE, "error", { backendOffline: true });
 }
 
 async function checkBackend() {
   if (state.streaming) return;
   try {
     const data = await api("/api/state");
-    if (state.backendOffline) updateChrome(data);
+    const wasOffline = state.backendOffline;
     state.backendOffline = false;
+    if (wasOffline) updateChrome(data);
   } catch (err) {
     markBackendOffline();
   }
 }
 
 async function runAction(action, message = "Working…") {
-  setStatus(message, "warning", { busy: true });
+  const token = setStatus(message, "warning", { busy: true });
   try {
     await action();
   } catch (err) {
     flashStatus(errorMessage(err), "error");
   } finally {
-    $("status").classList.remove("status-busy");
-    if ($("status").textContent === message) {
-      if (state.data) updateChrome(state.data);
-      else clearStatusTone();
-    }
+    clearStatus(token);
   }
 }
 
 function flashStatus(message, kind = "notice") {
-  setStatus(message, kind);
-  const status = $("status");
   const token = Symbol("status-flash");
-  state.statusFlashToken = token;
+  state.status.flash = { message, kind, token };
+  renderStatus();
+  const status = $("status");
   void status.offsetWidth;
   status.classList.add("status-flash");
   setTimeout(() => {
-    if (state.statusFlashToken !== token) return;
-    status.classList.remove("status-flash", `status-${kind}`);
-    state.statusFlashToken = null;
+    if (state.status.flash?.token !== token) return;
+    state.status.flash = null;
+    renderStatus();
   }, 1100);
 }
 
@@ -818,9 +870,8 @@ function updateChrome(data) {
   state.data = data;
   if (previousCwd !== data.cwd) state.filePath = ".";
   $("cwd").value = data.cwd || "";
-  $("status").classList.remove("backend-offline");
-  clearStatusTone();
-  $("status").textContent = data.sessionId || "new session";
+  if (!state.backendOffline) state.status.persistent = null;
+  renderStatus();
   updatePromptStatus(data);
   updateInspectorPanel(data);
 }
@@ -909,14 +960,13 @@ async function sendPrompt(text) {
   };
   const appendToolEvent = (evt) => {
     const name = evt.toolName || activeToolPart?.name || "tool";
-    if (evt.phase === "done") flashStatus(`${name} done`);
-    else setStatus(`Running ${name}…`, "warning", { busy: true });
     if (!activeToolPart || activeToolPart.phase === "done") {
-      activeToolPart = { type: "tool", name, phase: evt.phase || "running", startedAt: Date.now(), endedAt: null, command: "", messages: [], error: false };
+      activeToolPart = { type: "tool", name, phase: evt.phase || "running", createdAt: Date.now(), startedAt: null, endedAt: null, command: "", messages: [], error: false };
       streamParts.push(activeToolPart);
     }
     activeToolPart.name = name;
     activeToolPart.phase = evt.phase || activeToolPart.phase || "running";
+    if (activeToolPart.phase === "running" && !activeToolPart.startedAt) activeToolPart.startedAt = Date.now();
     if (activeToolPart.phase === "done" && !activeToolPart.endedAt) activeToolPart.endedAt = Date.now();
     activeToolPart.error = Boolean(evt.isError || activeToolPart.error);
     if (evt.message) {
@@ -944,8 +994,9 @@ async function sendPrompt(text) {
       tool.className = `turn-tool ${part.error ? "error" : ""}`;
       tool.open = part.phase !== "done";
       const summary = document.createElement("summary");
-      const duration = formatDuration((part.endedAt || Date.now()) - part.startedAt);
-      const phaseText = part.phase === "done" ? `done in ${duration}` : `${part.phase || "running"} for ${duration}`;
+      let phaseText = "queued";
+      if (part.phase === "done") phaseText = formatDuration((part.endedAt || Date.now()) - (part.startedAt || part.createdAt));
+      else if (part.phase === "running") phaseText = `running ${formatDuration(Date.now() - (part.startedAt || part.createdAt))}`;
       appendToolSummary(summary, `${part.name || "tool"} · ${phaseText}`, part.command, part.name);
       const content = document.createElement("div");
       content.className = "turn-tool-body";
@@ -1026,6 +1077,8 @@ async function sendPrompt(text) {
     }
   }
 }
+
+installComposerResize();
 
 $("chat").addEventListener("scroll", () => {
   state.autoScroll = isNearChatBottom();
