@@ -5,11 +5,11 @@ let memoryToken = "";
 export function apiAuthHeaders() {
   let token = memoryToken;
   try {
-    token = localStorage.getItem("piWebToken") || token;
+    token = localStorage.getItem("piHubToken") || token;
   } catch {
     // Use the in-memory token captured from the URL hash when storage is unavailable.
   }
-  return token ? { "x-pi-web-token": token } : {};
+  return token ? { "x-pi-hub-token": token } : {};
 }
 
 export function installApiTokenFromHash() {
@@ -18,7 +18,7 @@ export function installApiTokenFromHash() {
   if (!token) return;
   memoryToken = token;
   try {
-    localStorage.setItem("piWebToken", token);
+    localStorage.setItem("piHubToken", token);
   } catch {
     // Keep memoryToken for this page load and still remove the token from the URL.
   }

@@ -191,7 +191,7 @@ function assertApiAccess(req) {
 
   if (!apiToken) return;
   const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
-  const token = req.headers["x-pi-web-token"] || bearer;
+  const token = req.headers["x-pi-hub-token"] || bearer;
   if (token !== apiToken) throw new HttpError(401, "Missing or invalid API token");
 }
 
@@ -244,7 +244,7 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 server.listen(port, host, () => {
-  console.log(`${color("pi-web", colors.cyan)} listening at ${color(`http://${host}:${port}`, colors.green)}`);
+  console.log(`${color("pi-hub", colors.cyan)} listening at ${color(`http://${host}:${port}`, colors.green)}`);
   console.log(`cwd: ${cwd}`);
   console.log(`host: ${host}`);
   console.log(`port: ${port}`);

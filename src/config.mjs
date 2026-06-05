@@ -17,10 +17,10 @@ export const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const publicDir = join(rootDir, "public");
 export const port = parsePort(process.env.PORT);
 export const host = process.env.HOST ?? "127.0.0.1";
-export const apiToken = process.env.PI_WEB_TOKEN || "";
-export const allowRemote = process.env.PI_WEB_ALLOW_REMOTE === "1";
+export const apiToken = process.env.PI_HUB_TOKEN || "";
+export const allowRemote = process.env.PI_HUB_ALLOW_REMOTE === "1";
 export const isLoopbackHost = LOOPBACK_HOSTS.has(host);
 
 if (!isLoopbackHost && !allowRemote) {
-  throw new Error("Refusing to bind non-loopback HOST without PI_WEB_ALLOW_REMOTE=1. Only expose pi-web on a trusted LAN or behind an authenticated proxy/tunnel.");
+  throw new Error("Refusing to bind non-loopback HOST without PI_HUB_ALLOW_REMOTE=1. Only expose pi-hub on a trusted LAN or behind an authenticated proxy/tunnel.");
 }
