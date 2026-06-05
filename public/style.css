@@ -115,6 +115,10 @@ main { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr
 .msg-body li > p { margin: 0; }
 .msg-body li > p + p { margin-top: 4px; }
 .msg-body a { color: #7b5520; text-decoration-thickness: .08em; text-underline-offset: 2px; }
+.request-meta { display: flex; gap: 7px; align-items: center; margin-bottom: 7px; color: #6f6558; font-size: 11px; }
+.request-chip { border: 1px solid #d8c199; border-radius: 999px; padding: 1px 7px; background: #fbf2df; color: #76541d; font-family: var(--font-mono); }
+.request-view { border: 0; background: transparent; padding: 1px 3px; color: #7b5520; font-size: 11px; text-decoration: underline; text-underline-offset: 2px; }
+.request-view:hover { background: transparent; color: #5f3608; }
 .msg-body table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
 .msg-body th, .msg-body td { border: 1px solid #d8d0c3; padding: 4px 7px; text-align: left; }
 .msg-body th { background: #f3eadb; font-weight: 650; }

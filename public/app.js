@@ -19,6 +19,20 @@ function messageText(m) {
   return m.role === "assistant" ? "waiting…" : "";
 }
 
+function compactUserRequest(text) {
+  const skillMatch = text.match(/^<skill\s+([^>]*)>[\s\S]*?<\/skill>\s*([\s\S]*)$/);
+  if (skillMatch) {
+    const name = skillMatch[1].match(/\bname="([^"]+)"/)?.[1] || "skill";
+    return { command: `/skill:${name}`, visibleText: skillMatch[2].trim(), hiddenText: text };
+  }
+
+  const slashMatch = text.match(/^\/(\S+)\s+([\s\S]+)$/);
+  if (!slashMatch) return null;
+  const command = state.slashCommands.find((item) => item.name === slashMatch[1]);
+  if (!command || !["skill", "prompt"].includes(command.source)) return null;
+  return { command: `/${command.name}`, visibleText: slashMatch[2].trim(), hiddenText: text };
+}
+
 function shortJson(value) {
   if (value === undefined) return "";
   try {
@@ -332,6 +346,43 @@ function addMessageAction(target, kind, label, iconName, onClick) {
   target.append(actions);
 }
 
+function showRequestInspector(title, text) {
+  const panel = $("systemPanel");
+  state.inspector = "request";
+  panel.hidden = false;
+  panel.classList.remove("empty");
+  $("systemToggle").classList.remove("active");
+  $("treeToggle").classList.remove("active");
+  panel.textContent = `${title}\n\n${text}`;
+  panel.scrollTop = 0;
+}
+
+function renderUserRequest(body, text) {
+  const compact = compactUserRequest(text);
+  if (!compact) {
+    renderMarkdown(text, body);
+    return;
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "request-meta";
+  const chip = document.createElement("span");
+  chip.className = "request-chip";
+  chip.textContent = compact.command;
+  const view = document.createElement("button");
+  view.className = "request-view";
+  view.type = "button";
+  view.textContent = "View expanded request";
+  view.onclick = (ev) => {
+    ev.stopPropagation();
+    showRequestInspector(compact.command, compact.hiddenText);
+  };
+  meta.append(chip, view);
+  body.append(meta);
+
+  if (compact.visibleText) renderMarkdown(compact.visibleText, body);
+}
+
 function addAssistantTurnFromParts(turn, opts = {}) {
   const target = opts.container || $("chat");
   const el = document.createElement("article");
@@ -475,8 +526,9 @@ function addMessage(m, opts = {}) {
   role.textContent = m.toolName ? `${m.role || "tool"}: ${m.toolName}` : (m.role || "assistant");
   const summaryText = document.createElement("span");
   const detail = messageErrorDetail(m);
+  const userRequest = m.role === "user" ? compactUserRequest(messageText(m)) : null;
   summaryText.className = detail ? "msg-detail" : "msg-summary";
-  summaryText.textContent = detail || messageSummary(m);
+  summaryText.textContent = detail || (userRequest ? compactText([userRequest.command, userRequest.visibleText].filter(Boolean).join(" ")) : messageSummary(m));
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   head.append(role, summaryText, spacer);
@@ -496,7 +548,8 @@ function addMessage(m, opts = {}) {
   }
   const body = document.createElement("div");
   body.className = "msg-body";
-  renderMarkdown(messageText(m), body);
+  if (m.role === "user") renderUserRequest(body, messageText(m));
+  else renderMarkdown(messageText(m), body);
   if (opts.pending) {
     const p = document.createElement("span");
     p.className = "pending";
@@ -754,6 +807,7 @@ function updateInspectorPanel(data = state.data) {
     renderTreePanel(data);
     return;
   }
+  if (state.inspector === "request") return;
   const prompt = data?.systemPrompt;
   panel.classList.toggle("empty", !prompt);
   panel.textContent = prompt || (prompt === "" ? "System prompt is empty." : "Send a message to load the system prompt.");
@@ -914,13 +968,19 @@ const doEditHere = async (entryId) => {
 loadFiles = createFileSidebar({ state, api, $, errorMessage, insertPromptText });
 loadSessions = createSessionSidebar({ state, api, $, icon, runAction, refresh, renderState, updateSidebarData });
 
+function waitingText(startedAt = Date.now()) {
+  const dots = ".".repeat((Math.floor((Date.now() - startedAt) / 500) % 3) + 1);
+  return `waiting ${dots}`;
+}
+
 async function sendPrompt(text) {
   state.streaming = true;
   state.abortRequested = false;
   state.autoScroll = true;
   setStreamingUi(true);
   addMessage({ role: "user", text });
-  const assistant = addMessage({ role: "assistant", text: "waiting… (0s)" });
+  const startTime = Date.now();
+  const assistant = addMessage({ role: "assistant", text: waitingText(startTime) });
   assistant.body.classList.add("turn-body");
   const controller = new AbortController();
   state.abortController = controller;
@@ -931,24 +991,21 @@ async function sendPrompt(text) {
   let streamWarningShown = false;
   let latestPromptState = null;
   let lastStreamEventAt = Date.now();
-  const startTime = Date.now();
   const progressInterval = setInterval(() => {
-    const now = Date.now();
-    const idleMs = now - lastStreamEventAt;
+    const idleMs = Date.now() - lastStreamEventAt;
     if (!gotVisibleResponse) {
-      const elapsed = Math.floor((now - startTime) / 1000);
-      assistant.body.textContent = `waiting… (${elapsed}s)`;
+      assistant.body.textContent = waitingText(startTime);
       if (idleMs > STREAM_AWARENESS_TIMEOUT_MS && !streamWarningShown) {
         streamWarningShown = true;
-        setStatus(`No visible response for ${formatDuration(idleMs)}; still waiting.`, "warning");
+        setStatus("No visible response yet; still waiting.", "warning");
       }
       return;
     }
     if (activeToolPart && activeToolPart.phase !== "done") renderAssistant();
     if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
-      setStatus(`No stream updates for ${formatDuration(idleMs)}; backend/tool may be stuck.`, "warning");
+      setStatus("No stream updates; backend/tool may be stuck.", "warning");
     }
-  }, 1000);
+  }, 500);
   const appendTextDelta = (delta) => {
     output += delta;
     let part = streamParts[streamParts.length - 1];
