@@ -18,23 +18,37 @@ function toolMessage(phase, toolName, details) {
   return `${icon} ${toolName} ${label}${suffix}`;
 }
 
-export function subscribePromptEvents(session, res, getState) {
+function argsText(args) {
+  if (typeof args === "string") return args;
+  try {
+    return JSON.stringify(args ?? "");
+  } catch {
+    return String(args ?? "");
+  }
+}
+
+function skillLabel(args) {
+  const name = argsText(args).match(/\/skills\/([^/\s"']+)/)?.[1];
+  return name ? `skill:${name}` : "";
+}
+
+function subscribePromptEventSink(session, { write = null, getState = null, onEvent = null } = {}) {
   return session.subscribe((event) => {
     switch (event.type) {
       case "message_start":
-        writeNdjson(res, { type: "message_start" });
+        write?.({ type: "message_start" });
         return;
       case "message_update":
-        writeAssistantUpdate(res, event.assistantMessageEvent);
+        writeAssistantUpdate(write, event.assistantMessageEvent, onEvent);
         return;
       case "tool_execution_start":
-        writeNdjson(res, { type: "tool", phase: "running", toolName: event.toolName, message: toolMessage("running", event.toolName, event.args) });
+        write?.({ type: "tool", phase: "running", toolName: event.toolName, message: toolMessage("running", event.toolName, event.args) });
         return;
       case "tool_execution_update":
-        writeNdjson(res, { type: "tool", phase: "update", toolName: event.toolName, message: toolMessage("update", event.toolName, textOfContent(event.partialResult?.content)) });
+        write?.({ type: "tool", phase: "update", toolName: event.toolName, message: toolMessage("update", event.toolName, textOfContent(event.partialResult?.content)) });
         return;
       case "tool_execution_end":
-        writeNdjson(res, {
+        write?.({
           type: "tool",
           phase: "done",
           toolName: event.toolName,
@@ -43,7 +57,7 @@ export function subscribePromptEvents(session, res, getState) {
         });
         return;
       case "agent_end":
-        writeNdjson(res, { type: "state", state: getState() });
+        if (getState) write?.({ type: "state", state: getState() });
         return;
       default:
         return;
@@ -51,21 +65,31 @@ export function subscribePromptEvents(session, res, getState) {
   });
 }
 
-function writeAssistantUpdate(res, update) {
+export function observePromptEvents(session, onEvent) {
+  return subscribePromptEventSink(session, { onEvent });
+}
+
+export function subscribePromptEvents(session, res, getState, onEvent = null) {
+  return subscribePromptEventSink(session, { write: (event) => writeNdjson(res, event), getState, onEvent });
+}
+
+function writeAssistantUpdate(write, update, onEvent = null) {
   if (update?.type === "text_delta") {
-    writeNdjson(res, { type: "delta", delta: update.delta });
+    write?.({ type: "delta", delta: update.delta });
     return;
   }
   if (update?.type === "thinking_delta") {
-    writeNdjson(res, { type: "delta", delta: update.delta ?? update.thinking });
+    write?.({ type: "delta", delta: update.delta ?? update.thinking });
     return;
   }
   if (update?.type === "toolcall_start") {
-    writeNdjson(res, { type: "tool", phase: "queued", message: "… preparing tool call" });
+    write?.({ type: "tool", phase: "queued", message: "… preparing tool call" });
     return;
   }
   if (update?.type === "toolcall_end" && update.toolCall) {
-    writeNdjson(res, {
+    const label = skillLabel(update.toolCall.arguments);
+    if (label) onEvent?.("tool", `${label} called`);
+    write?.({
       type: "tool",
       phase: "queued",
       toolName: update.toolCall.name,

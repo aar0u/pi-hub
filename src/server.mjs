@@ -13,7 +13,7 @@ import { DATA_DIR, TaskStore } from "./task-store.mjs";
 import { startTelegramBot } from "./telegram-bot.mjs";
 import { sessionPayload } from "./session-state.mjs";
 import { serveStatic } from "./static.mjs";
-import { subscribePromptEvents } from "./stream-events.mjs";
+import { observePromptEvents, subscribePromptEvents } from "./stream-events.mjs";
 
 let cwd = process.cwd();
 const fixedTelegramCwd = resolve(configuredTelegramCwd || cwd);
@@ -152,10 +152,16 @@ async function runPromptText({ text, source = "api", taskId = null, telegramChat
   if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "Message is empty");
   const { activeRuntime, activeSession } = beginPrompt();
   const startedAt = new Date().toISOString();
+  logEvent("prompt", `start ${source}${taskId ? ` task=${taskId}` : ""}`);
   try {
     await activeSession.prompt(text.trim());
     const state = sessionPayload(activeRuntime);
+    logLargeTokenUsage(source, state);
+    logEvent("prompt", `done ${source}`);
     return { source, taskId, telegramChatId: chatId, startedAt, finishedAt: new Date().toISOString(), state, text: lastMessageText(state), summary: summarizeState(state) };
+  } catch (error) {
+    logEvent("prompt", `error ${source}: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   } finally {
     clearActivePrompt(activeSession);
   }
@@ -168,11 +174,19 @@ async function runTelegramPromptText({ text, source = "telegram", telegramChatId
 
   operationState = "prompt";
   const startedAt = new Date().toISOString();
+  logEvent("prompt", `start ${source}`);
+  const unsubscribe = observePromptEvents(telegramRuntime.session, logEvent);
   try {
     await telegramRuntime.session.prompt(text.trim());
     const state = sessionPayload(telegramRuntime);
+    logLargeTokenUsage(source, state);
+    logEvent("prompt", `done ${source}`);
     return { source, telegramChatId: chatId, startedAt, finishedAt: new Date().toISOString(), state, text: lastMessageText(state), summary: summarizeState(state) };
+  } catch (error) {
+    logEvent("prompt", `error ${source}: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   } finally {
+    unsubscribe();
     operationState = "idle";
   }
 }
@@ -184,13 +198,22 @@ async function runEphemeralPromptText({ text, source = "task-proposal", telegram
   operationState = "prompt";
   const proposalCwd = source === "telegram" ? fixedTelegramCwd : cwd;
   let proposalRuntime = null;
+  let unsubscribe = () => {};
   const startedAt = new Date().toISOString();
+  logEvent("proposal", `start ${source}`);
   try {
     proposalRuntime = await makeRuntime(proposalCwd, SessionManager.inMemory(proposalCwd));
+    unsubscribe = observePromptEvents(proposalRuntime.session, logEvent);
     await proposalRuntime.session.prompt(text.trim());
     const state = sessionPayload(proposalRuntime);
+    logLargeTokenUsage(`proposal ${source}`, state);
+    logEvent("proposal", `done ${source}`);
     return { source, telegramChatId: chatId, startedAt, finishedAt: new Date().toISOString(), state, text: lastMessageText(state), summary: summarizeState(state) };
+  } catch (error) {
+    logEvent("proposal", `error ${source}: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   } finally {
+    unsubscribe();
     await proposalRuntime?.dispose().catch(() => {});
     operationState = "idle";
   }
@@ -215,9 +238,15 @@ async function runTaskPromptText({ text, task, source = "scheduler" }) {
   try {
     shouldRefreshActiveRuntime = runtime.session.sessionFile === task.sessionFile;
     taskRuntime = await makeRuntime(task.cwd, SessionManager.open(task.sessionFile));
+    const unsubscribe = observePromptEvents(taskRuntime.session, logEvent);
     const startedAt = new Date().toISOString();
-    await taskRuntime.session.prompt(text.trim());
+    try {
+      await taskRuntime.session.prompt(text.trim());
+    } finally {
+      unsubscribe();
+    }
     const state = sessionPayload(taskRuntime);
+    logLargeTokenUsage(`task ${task.id}`, state);
     return { source, taskId: task.id, startedAt, finishedAt: new Date().toISOString(), state, text: lastMessageText(state), summary: summarizeState(state) };
   } finally {
     await taskRuntime?.dispose().catch(() => {});
@@ -270,15 +299,85 @@ const colors = process.stdout.isTTY ? {
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   red: "\x1b[31m",
+  blue: "\x1b[34m",
+  magenta: "\x1b[35m",
   cyan: "\x1b[36m",
-} : { reset: "", dim: "", green: "", yellow: "", red: "", cyan: "" };
+} : { reset: "", dim: "", green: "", yellow: "", red: "", blue: "", magenta: "", cyan: "" };
 
 function color(value, code) {
   return `${code}${value}${colors.reset}`;
 }
 
+function logTime() {
+  return new Date().toTimeString().slice(0, 8);
+}
+
 function clientAddress(req) {
   return req.socket.remoteAddress || "unknown";
+}
+
+const QUIET_POLL_PATHS = new Set(["/api/state", "/api/sessions"]);
+const POLL_AWARENESS_INTERVAL_MS = 60_000;
+const LARGE_TOKEN_THRESHOLD = 50_000;
+const LARGE_CONTEXT_PERCENT = 70;
+const pollStats = new Map();
+let lastPollAwarenessAt = Date.now();
+
+function eventColor(kind) {
+  if (kind === "prompt" || kind === "proposal") return colors.cyan;
+  if (kind === "task") return colors.magenta;
+  if (kind === "tool") return colors.blue;
+  if (kind === "tokens") return colors.yellow;
+  if (kind === "poll") return colors.dim;
+  return colors.green;
+}
+
+function logEvent(kind, message) {
+  console.log(`${color(logTime(), colors.dim)} ${color("event", colors.cyan)} ${color(kind, eventColor(kind))} ${message}`);
+}
+
+function formatK(value) {
+  if (!Number.isFinite(value)) return "?";
+  return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, "")}k` : String(value);
+}
+
+function tokenCount(stats) {
+  const tokens = stats?.tokens || {};
+  return (tokens.input || 0) + (tokens.output || 0) + (tokens.cacheRead || 0);
+}
+
+function logLargeTokenUsage(label, state) {
+  const stats = state?.stats;
+  const total = tokenCount(stats);
+  const percent = stats?.contextUsage?.percent;
+  if (total < LARGE_TOKEN_THRESHOLD && (!Number.isFinite(percent) || percent < LARGE_CONTEXT_PERCENT)) return;
+  const parts = [`${label}: tokens ${formatK(total)} (threshold ${formatK(LARGE_TOKEN_THRESHOLD)})`];
+  if (Number.isFinite(percent)) parts.push(`context ${Math.round(percent)}%`);
+  logEvent("tokens", parts.join(", "));
+}
+
+function recordPollRequest(pathname, status, duration) {
+  const stats = pollStats.get(pathname) || { count: 0, errors: 0, totalMs: 0, lastStatus: 0 };
+  stats.count += 1;
+  stats.totalMs += duration;
+  stats.lastStatus = status;
+  if (status >= 400) stats.errors += 1;
+  pollStats.set(pathname, stats);
+}
+
+function flushPollAwareness(force = false) {
+  const now = Date.now();
+  if (!force && now - lastPollAwarenessAt < POLL_AWARENESS_INTERVAL_MS) return;
+  lastPollAwarenessAt = now;
+  const parts = [];
+  for (const [pathname, stats] of pollStats) {
+    if (!stats.count) continue;
+    const avg = Math.round(stats.totalMs / stats.count);
+    const errors = stats.errors ? ` err ${stats.errors}` : "";
+    parts.push(`${pathname}×${stats.count} ${stats.lastStatus} avg ${avg}ms${errors}`);
+  }
+  pollStats.clear();
+  if (parts.length) logEvent("poll", parts.join(" · "));
 }
 
 function statusColor(status) {
@@ -295,8 +394,14 @@ function logRequest(req, res, url) {
     logged = true;
     const status = res.statusCode || 0;
     const duration = Date.now() - started;
+    if (!event && req.method === "GET" && QUIET_POLL_PATHS.has(url.pathname) && status < 400) {
+      recordPollRequest(url.pathname, status, duration);
+      flushPollAwareness();
+      return;
+    }
+    flushPollAwareness();
     const suffix = event ? ` ${color(event, colors.red)}` : "";
-    console.log(`${color(req.method, colors.cyan)} ${url.pathname} ${color(status, statusColor(status))} ${color(`${duration}ms`, colors.dim)}${suffix} ${color(clientAddress(req), colors.dim)}`);
+    console.log(`${color(logTime(), colors.dim)} ${color(req.method, colors.cyan)} ${url.pathname} ${color(status, statusColor(status))} ${color(`${duration}ms`, colors.dim)}${suffix} ${color(clientAddress(req), colors.dim)}`);
   };
   res.once("finish", () => write());
   res.once("close", () => {
@@ -358,12 +463,17 @@ async function handlePrompt(req, res) {
     void activeSession.abort().catch(() => {});
   });
 
-  const unsubscribe = subscribePromptEvents(activeSession, res, () => sessionPayload(activeRuntime));
+  const unsubscribe = subscribePromptEvents(activeSession, res, () => sessionPayload(activeRuntime), logEvent);
+  logEvent("prompt", "start web");
   try {
     writeNdjson(res, { type: "accepted" });
     await activeSession.prompt(text);
-    writeNdjson(res, { type: "done", state: sessionPayload(activeRuntime) });
+    const state = sessionPayload(activeRuntime);
+    logLargeTokenUsage("web", state);
+    logEvent("prompt", "done web");
+    writeNdjson(res, { type: "done", state });
   } catch (error) {
+    logEvent("prompt", `error web: ${error instanceof Error ? error.message : String(error)}`);
     writeNdjson(res, { type: "error", message: error instanceof Error ? error.message : String(error), state: sessionPayload(activeRuntime) });
   } finally {
     completed = true;
@@ -421,6 +531,7 @@ const scheduler = startScheduler({
   runner: promptRunner,
   intervalMs: schedulerIntervalMs,
   notifyTelegram: telegramBot?.sendMessage,
+  logEvent,
 });
 
 const server = createServer((req, res) => {
@@ -442,6 +553,7 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n${signal}: shutting down...`);
+  flushPollAwareness(true);
   server.close();
   scheduler.stop();
   telegramBot?.stop();

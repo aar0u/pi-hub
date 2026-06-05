@@ -8,7 +8,7 @@ function summaryFromState(state) {
   return text.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
-export function startScheduler({ taskStore, runner, intervalMs = DEFAULT_INTERVAL_MS, notifyTelegram = null }) {
+export function startScheduler({ taskStore, runner, intervalMs = DEFAULT_INTERVAL_MS, notifyTelegram = null, logEvent = null }) {
   let timer = null;
   let running = false;
 
@@ -24,9 +24,13 @@ export function startScheduler({ taskStore, runner, intervalMs = DEFAULT_INTERVA
   async function runDueTask(task, now) {
     const runKey = minuteKey(now);
     await taskStore.update(task.id, { dueAt: now.toISOString(), lastRunKey: runKey });
-    if (!runner.isIdle()) return;
+    if (!runner.isIdle()) {
+      logEvent?.("task", `defer ${task.id}; runner busy`);
+      return;
+    }
 
     const startedAt = new Date().toISOString();
+    logEvent?.("task", `trigger ${task.id} ${task.cron}`);
     await taskStore.update(task.id, { dueAt: null, lastRunAt: startedAt });
     try {
       const result = await runner.runTask({
@@ -40,6 +44,7 @@ export function startScheduler({ taskStore, runner, intervalMs = DEFAULT_INTERVA
       const run = { taskId: task.id, source: "scheduler", status: "success", startedAt, finishedAt, summary, sessionFile: task.sessionFile, sessionId: task.sessionId };
       await taskStore.appendRun(run);
       await taskStore.update(task.id, { lastResult: run });
+      logEvent?.("task", `success ${task.id}`);
       await notifyTaskTelegram(task, `Scheduled task ${task.id} completed.\n\n${notification}`);
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -47,6 +52,7 @@ export function startScheduler({ taskStore, runner, intervalMs = DEFAULT_INTERVA
       const run = { taskId: task.id, source: "scheduler", status: "error", startedAt, finishedAt, error: message, sessionFile: task.sessionFile, sessionId: task.sessionId };
       await taskStore.appendRun(run);
       await taskStore.update(task.id, { lastResult: run, ...(task.sessionFile ? {} : { status: "disabled" }) });
+      logEvent?.("task", `error ${task.id}: ${message}`);
       await notifyTaskTelegram(task, `Scheduled task ${task.id} failed.\n\n${message}`);
     }
   }
