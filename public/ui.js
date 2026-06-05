@@ -26,3 +26,19 @@ export function compactText(text, max = 120) {
   const value = (text || "").replace(/\s+/g, " ").trim();
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
+
+export function compactUserRequest(text, slashCommands = []) {
+  const value = text || "";
+  const skillMatch = value.match(/^<skill\s+([^>]*)>[\s\S]*?<\/skill>\s*([\s\S]*)$/);
+  if (skillMatch) {
+    const name = skillMatch[1].match(/\bname="([^"]+)"/)?.[1] || "skill";
+    return { command: `/skill:${name}`, visibleText: skillMatch[2].trim(), hiddenText: value };
+  }
+
+  const slashMatch = value.match(/^\/(\S+)\s+([\s\S]+)$/);
+  if (!slashMatch) return null;
+  const command = slashCommands.find((item) => item.name === slashMatch[1]);
+  if (!command && !slashMatch[1].startsWith("skill:")) return null;
+  if (command && !["skill", "prompt"].includes(command.source)) return null;
+  return { command: `/${slashMatch[1]}`, visibleText: slashMatch[2].trim(), hiddenText: value };
+}

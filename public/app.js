@@ -3,7 +3,7 @@ import { renderMarkdown } from "./markdown.js";
 import { apiAuthHeaders, installApiTokenFromHash, readNdjsonStream, STREAM_AWARENESS_TIMEOUT_MS } from "./stream.js";
 import { createFileSidebar } from "./sidebar-files.js";
 import { createSessionSidebar } from "./sidebar-sessions.js";
-import { $, compactText, formatDuration, icon, setIcon } from "./ui.js";
+import { $, compactText, compactUserRequest, formatDuration, icon, setIcon } from "./ui.js";
 
 installApiTokenFromHash();
 
@@ -17,20 +17,6 @@ function messageText(m) {
   if (m.error) return m.error;
   if (m.text) return m.text;
   return m.role === "assistant" ? "waiting…" : "";
-}
-
-function compactUserRequest(text) {
-  const skillMatch = text.match(/^<skill\s+([^>]*)>[\s\S]*?<\/skill>\s*([\s\S]*)$/);
-  if (skillMatch) {
-    const name = skillMatch[1].match(/\bname="([^"]+)"/)?.[1] || "skill";
-    return { command: `/skill:${name}`, visibleText: skillMatch[2].trim(), hiddenText: text };
-  }
-
-  const slashMatch = text.match(/^\/(\S+)\s+([\s\S]+)$/);
-  if (!slashMatch) return null;
-  const command = state.slashCommands.find((item) => item.name === slashMatch[1]);
-  if (!command || !["skill", "prompt"].includes(command.source)) return null;
-  return { command: `/${command.name}`, visibleText: slashMatch[2].trim(), hiddenText: text };
 }
 
 function shortJson(value) {
@@ -333,17 +319,84 @@ function toggleAllResponses() {
 
 function addMessageAction(target, kind, label, iconName, onClick) {
   if (!target || !onClick) return;
-  const actions = document.createElement("div");
-  actions.className = `msg-actions ${kind}-actions`;
+  let actions = target.nextElementSibling?.matches?.(`.msg-actions.${kind}-actions`) ? target.nextElementSibling : null;
+  if (!actions) {
+    actions = document.createElement("div");
+    actions.className = `msg-actions ${kind}-actions`;
+    target.insertAdjacentElement("afterend", actions);
+  }
   const button = document.createElement("button");
   button.className = "msg-action";
   button.type = "button";
   button.title = label;
   button.setAttribute("aria-label", label);
-  button.append(icon(iconName), label);
-  button.onclick = onClick;
+  if (iconName) button.append(icon(iconName), label);
+  else button.textContent = label;
+  button.onclick = (ev) => {
+    ev.stopPropagation();
+    onClick(ev);
+  };
   actions.append(button);
-  target.append(actions);
+}
+
+function debugContext() {
+  return {
+    sessionId: state.data?.sessionId || null,
+    sessionName: state.data?.sessionName || null,
+    leafId: state.data?.leafId || null,
+    cwd: state.data?.cwd || null,
+    sessionFile: state.data?.sessionFile || null,
+    model: state.data?.model || null,
+  };
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flashStatus("Debug info copied");
+  } catch (err) {
+    flashStatus(errorMessage(err), "error");
+  }
+}
+
+function showDebugInspector(title, payload) {
+  const panel = $("systemPanel");
+  const debugInfo = JSON.stringify({ title, timestamp: new Date().toISOString(), context: debugContext(), ...payload }, null, 2);
+  state.inspector = "debug";
+  panel.hidden = false;
+  panel.classList.remove("empty");
+  $("systemToggle").classList.remove("active");
+  $("treeToggle").classList.remove("active");
+  panel.innerHTML = "";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "debug-toolbar";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.onclick = () => void copyText(debugInfo);
+  toolbar.append(heading, copy);
+
+  const pre = document.createElement("pre");
+  pre.className = "debug-json";
+  pre.textContent = debugInfo;
+  panel.append(toolbar, pre);
+  panel.scrollTop = 0;
+}
+
+function addToolInspect(summary, title, data) {
+  const inspect = document.createElement("button");
+  inspect.className = "tool-inspect";
+  inspect.type = "button";
+  inspect.textContent = "Inspect";
+  inspect.onclick = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    showDebugInspector(title, data);
+  };
+  summary.append(inspect);
 }
 
 function showRequestInspector(title, text) {
@@ -358,7 +411,7 @@ function showRequestInspector(title, text) {
 }
 
 function renderUserRequest(body, text) {
-  const compact = compactUserRequest(text);
+  const compact = compactUserRequest(text, state.slashCommands);
   if (!compact) {
     renderMarkdown(text, body);
     return;
@@ -428,6 +481,7 @@ function addAssistantTurnFromParts(turn, opts = {}) {
     tool.className = `turn-tool ${part.error ? "error" : ""}`;
     const summary = document.createElement("summary");
     appendToolSummary(summary, part.name || "tool", part.call, part.name);
+    addToolInspect(summary, `Tool: ${part.name || "tool"}`, { type: "tool", ids, part });
     const content = document.createElement("div");
     content.className = "turn-tool-body";
     const command = document.createElement("div");
@@ -446,6 +500,7 @@ function addAssistantTurnFromParts(turn, opts = {}) {
   target.append(el);
   const forkEntry = ids[ids.length - 1];
   if (forkEntry) addMessageAction(el, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
+  addMessageAction(el, "assistant", "Inspect", null, () => showDebugInspector("Assistant response", { type: "assistant-turn", ids, turn }));
   if (target === $("chat")) scrollChatToBottom();
   return { el, body };
 }
@@ -494,6 +549,7 @@ function addAssistantTurn(messages, opts = {}) {
     tool.className = `turn-tool ${part.error ? "error" : ""}`;
     const summary = document.createElement("summary");
     appendToolSummary(summary, part.name, part.call, part.name);
+    addToolInspect(summary, `Tool: ${part.name || "tool"}`, { type: "tool", ids, part });
     const content = document.createElement("div");
     content.className = "turn-tool-body";
     const command = document.createElement("div");
@@ -511,6 +567,7 @@ function addAssistantTurn(messages, opts = {}) {
   target.append(el);
   const forkEntry = [...messages].reverse().find((m) => m.id)?.id;
   if (forkEntry) addMessageAction(el, "assistant", "Fork from here", "fork", () => doFork(forkEntry));
+  addMessageAction(el, "assistant", "Inspect", null, () => showDebugInspector("Assistant response", { type: "assistant-run", ids, messages }));
   if (target === $("chat")) scrollChatToBottom();
   return { el, body };
 }
@@ -526,7 +583,7 @@ function addMessage(m, opts = {}) {
   role.textContent = m.toolName ? `${m.role || "tool"}: ${m.toolName}` : (m.role || "assistant");
   const summaryText = document.createElement("span");
   const detail = messageErrorDetail(m);
-  const userRequest = m.role === "user" ? compactUserRequest(messageText(m)) : null;
+  const userRequest = m.role === "user" ? compactUserRequest(messageText(m), state.slashCommands) : null;
   summaryText.className = detail ? "msg-detail" : "msg-summary";
   summaryText.textContent = detail || (userRequest ? compactText([userRequest.command, userRequest.visibleText].filter(Boolean).join(" ")) : messageSummary(m));
   const spacer = document.createElement("span");
@@ -560,6 +617,7 @@ function addMessage(m, opts = {}) {
   target.append(el);
   if (m.role === "user" && m.id) addMessageAction(el, "user", "Edit from here", "navigate", () => doEditHere(m.id));
   if (m.role === "assistant" && m.id) addMessageAction(el, "assistant", "Fork from here", "fork", () => doFork(m.id));
+  if (opts.inspect !== false) addMessageAction(el, m.role || "assistant", "Inspect", null, () => showDebugInspector("Message", { type: "message", message: m }));
   if (target === $("chat")) {
     updateResponsesFoldToggle();
     scrollChatToBottom();
@@ -807,7 +865,7 @@ function updateInspectorPanel(data = state.data) {
     renderTreePanel(data);
     return;
   }
-  if (state.inspector === "request") return;
+  if (state.inspector === "request" || state.inspector === "debug") return;
   const prompt = data?.systemPrompt;
   panel.classList.toggle("empty", !prompt);
   panel.textContent = prompt || (prompt === "" ? "System prompt is empty." : "Send a message to load the system prompt.");
@@ -980,7 +1038,8 @@ async function sendPrompt(text) {
   setStreamingUi(true);
   addMessage({ role: "user", text });
   const startTime = Date.now();
-  const assistant = addMessage({ role: "assistant", text: waitingText(startTime) });
+  const assistant = addMessage({ role: "assistant", text: waitingText(startTime) }, { inspect: false });
+  addMessageAction(assistant.el, "assistant", "Inspect stream", null, () => showDebugInspector("Streaming response", { type: "streaming-response", output, streamParts }));
   assistant.body.classList.add("turn-body");
   const controller = new AbortController();
   state.abortController = controller;
@@ -1055,6 +1114,7 @@ async function sendPrompt(text) {
       if (part.phase === "done") phaseText = formatDuration((part.endedAt || Date.now()) - (part.startedAt || part.createdAt));
       else if (part.phase === "running") phaseText = `running ${formatDuration(Date.now() - (part.startedAt || part.createdAt))}`;
       appendToolSummary(summary, `${part.name || "tool"} · ${phaseText}`, part.command, part.name);
+      addToolInspect(summary, `Tool: ${part.name || "tool"}`, { type: "streaming-tool", part });
       const content = document.createElement("div");
       content.className = "turn-tool-body";
       const command = document.createElement("div");

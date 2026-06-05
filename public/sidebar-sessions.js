@@ -1,3 +1,11 @@
+import { compactText, compactUserRequest } from "./ui.js";
+
+function sessionTitleText(text, slashCommands) {
+  const compact = compactUserRequest(text || "", slashCommands);
+  if (!compact) return text;
+  return compactText([compact.command, compact.visibleText].filter(Boolean).join(" "));
+}
+
 export function createSessionSidebar({ state, api, $, icon, runAction, refresh, renderState, updateSidebarData }) {
   return async function loadSessions() {
     const sessions = await api("/api/sessions");
@@ -14,7 +22,7 @@ export function createSessionSidebar({ state, api, $, icon, runAction, refresh, 
       main.className = "session-main";
       const title = document.createElement("div");
       title.className = "session-title";
-      title.textContent = s.name || s.firstMessage || "(empty session)";
+      title.textContent = sessionTitleText(s.name || s.firstMessage, state.slashCommands) || "(empty session)";
       const meta = document.createElement("div");
       meta.className = "session-meta";
       meta.textContent = `${s.messageCount} msg · ${new Date(s.modified).toLocaleString()}`;
