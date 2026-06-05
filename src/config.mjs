@@ -13,11 +13,21 @@ function parsePort(value) {
   return port;
 }
 
+function parsePositiveInt(value, fallback, name) {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`Invalid ${name}: ${value}`);
+  return parsed;
+}
+
 export const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const publicDir = join(rootDir, "public");
 export const port = parsePort(process.env.PORT);
 export const host = process.env.HOST ?? "127.0.0.1";
 export const apiToken = process.env.PI_HUB_TOKEN || "";
+export const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
+export const telegramChatId = process.env.TELEGRAM_CHAT_ID || "";
+export const schedulerIntervalMs = parsePositiveInt(process.env.PI_HUB_SCHEDULER_INTERVAL_MS, 30_000, "PI_HUB_SCHEDULER_INTERVAL_MS");
 export const allowRemote = process.env.PI_HUB_ALLOW_REMOTE === "1";
 export const isLoopbackHost = LOOPBACK_HOSTS.has(host);
 

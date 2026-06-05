@@ -1,18 +1,24 @@
 import { createServer } from "node:http";
-import { allowRemote, apiToken, host, isLoopbackHost, port, publicDir } from "./config.mjs";
+import { allowRemote, apiToken, host, isLoopbackHost, port, publicDir, schedulerIntervalMs, telegramBotToken, telegramChatId } from "./config.mjs";
 import { HttpError, readBody, sendError, sendJson, writeNdjson } from "./http.mjs";
 import { makeRuntime, SessionManager } from "./pi-runtime.mjs";
 import { registerFilesRoutes } from "./routes/files.mjs";
 import { registerRuntimeRoutes } from "./routes/runtime.mjs";
 import { registerSessionsRoutes } from "./routes/sessions.mjs";
+import { registerTasksRoutes } from "./routes/tasks.mjs";
+import { startScheduler } from "./scheduler.mjs";
+import { TaskStore } from "./task-store.mjs";
+import { startTelegramBot } from "./telegram-bot.mjs";
 import { sessionPayload } from "./session-state.mjs";
 import { serveStatic } from "./static.mjs";
 import { subscribePromptEvents } from "./stream-events.mjs";
 
 let cwd = process.cwd();
 let runtime = await makeRuntime(cwd, SessionManager.continueRecent(cwd));
+const taskStore = await TaskStore.open();
 let operationState = "idle";
 let activePrompt = null;
+let promptQueue = Promise.resolve();
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -20,6 +26,11 @@ function sleep(ms) {
 
 function currentState() {
   return sessionPayload(runtime);
+}
+
+function summarizeState(state) {
+  const last = state?.messages?.[state.messages.length - 1];
+  return (last?.text || "").replace(/\s+/g, " ").trim().slice(0, 1500);
 }
 
 function promptIsActive() {
@@ -60,6 +71,77 @@ async function withRuntimeMutation(fn) {
     operationState = "idle";
   }
 }
+
+function beginPrompt() {
+  if (operationState === "mutation") throw new HttpError(409, "Another session operation is in progress");
+  if (promptIsActive()) throw new HttpError(409, "A response is already streaming");
+  operationState = "prompt";
+  const activeRuntime = runtime;
+  const activeSession = activeRuntime.session;
+  activePrompt = { session: activeSession, clientClosed: false };
+  return { activeRuntime, activeSession };
+}
+
+async function runPromptText({ text, source = "api", taskId = null, telegramChatId: chatId = null }) {
+  if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "Message is empty");
+  const { activeRuntime, activeSession } = beginPrompt();
+  const startedAt = new Date().toISOString();
+  try {
+    await activeSession.prompt(text.trim());
+    const state = sessionPayload(activeRuntime);
+    return { source, taskId, telegramChatId: chatId, startedAt, finishedAt: new Date().toISOString(), state, summary: summarizeState(state) };
+  } finally {
+    clearActivePrompt(activeSession);
+  }
+}
+
+async function refreshActiveRuntimeIfSessionChanged(sessionFile, nextCwd) {
+  if (!sessionFile || runtime.session.sessionFile !== sessionFile) return;
+  const oldRuntime = runtime;
+  cwd = nextCwd || cwd;
+  runtime = await makeRuntime(cwd, SessionManager.open(sessionFile));
+  await oldRuntime.dispose().catch(() => {});
+}
+
+async function runTaskPromptText({ text, task, source = "scheduler" }) {
+  if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "Message is empty");
+  if (!task?.sessionFile || !task?.cwd) throw new HttpError(409, "Scheduled task has no bound session; recreate it so it can be pinned to a conversation");
+  if (operationState !== "idle" || promptIsActive()) throw new HttpError(409, "A response is already streaming");
+
+  operationState = "prompt";
+  let taskRuntime = null;
+  let shouldRefreshActiveRuntime = false;
+  try {
+    shouldRefreshActiveRuntime = runtime.session.sessionFile === task.sessionFile;
+    taskRuntime = await makeRuntime(task.cwd, SessionManager.open(task.sessionFile));
+    const startedAt = new Date().toISOString();
+    await taskRuntime.session.prompt(text.trim());
+    const state = sessionPayload(taskRuntime);
+    return { source, taskId: task.id, startedAt, finishedAt: new Date().toISOString(), state, summary: summarizeState(state) };
+  } finally {
+    await taskRuntime?.dispose().catch(() => {});
+    operationState = "idle";
+    if (shouldRefreshActiveRuntime) await refreshActiveRuntimeIfSessionChanged(task.sessionFile, task.cwd);
+  }
+}
+
+async function waitForIdle() {
+  while (promptIsActive() || operationState !== "idle") await sleep(500);
+}
+
+const promptRunner = {
+  isIdle: () => !promptIsActive() && operationState === "idle",
+  runText: runPromptText,
+  runTask: runTaskPromptText,
+  enqueue(input) {
+    const run = promptQueue.then(async () => {
+      await waitForIdle();
+      return runPromptText(input);
+    });
+    promptQueue = run.catch(() => {});
+    return run;
+  },
+};
 
 const colors = process.stdout.isTTY ? {
   reset: "\x1b[0m",
@@ -109,10 +191,13 @@ const routeContext = {
   setRuntime: (nextRuntime) => { runtime = nextRuntime; },
   currentState,
   withRuntimeMutation,
+  promptRunner,
+  taskStore,
 };
 registerRuntimeRoutes(apiRoutes, routeContext);
 registerSessionsRoutes(apiRoutes, routeContext);
 registerFilesRoutes(apiRoutes, routeContext);
+registerTasksRoutes(apiRoutes, routeContext);
 
 function clearActivePrompt(activeSession) {
   if (activePrompt?.session === activeSession) activePrompt = null;
@@ -136,14 +221,7 @@ async function readPromptText(req, activeSession) {
 }
 
 async function handlePrompt(req, res) {
-  if (operationState === "mutation") throw new HttpError(409, "Another session operation is in progress");
-  if (promptIsActive()) throw new HttpError(409, "A response is already streaming");
-
-  operationState = "prompt";
-  const activeRuntime = runtime;
-  const activeSession = activeRuntime.session;
-  activePrompt = { session: activeSession, clientClosed: false };
-
+  const { activeRuntime, activeSession } = beginPrompt();
   const text = await readPromptText(req, activeSession);
   res.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
@@ -216,6 +294,9 @@ async function handleApi(req, res, url) {
   }
 }
 
+const scheduler = startScheduler({ taskStore, runner: promptRunner, intervalMs: schedulerIntervalMs });
+const telegramBot = startTelegramBot({ token: telegramBotToken, allowedChatId: telegramChatId, taskStore, runner: promptRunner });
+
 const server = createServer((req, res) => {
   let url;
   try {
@@ -236,6 +317,8 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.log(`\n${signal}: shutting down...`);
   server.close();
+  scheduler.stop();
+  telegramBot?.stop();
   await runtime.dispose().catch(() => {});
   process.exit(0);
 }
@@ -251,4 +334,6 @@ server.listen(port, host, () => {
   console.log(`allow remote: ${allowRemote ? color("yes", colors.yellow) : "no"}`);
   console.log(`loopback host: ${isLoopbackHost ? color("yes", colors.green) : color("no", colors.yellow)}`);
   console.log(`api token: ${apiToken ? color("enabled", colors.green) : "disabled"}`);
+  console.log(`telegram bot: ${telegramBotToken ? color("enabled", colors.green) : "disabled"}`);
+  console.log(`task persistence: data/tasks.json + data/task-runs.jsonl`);
 });

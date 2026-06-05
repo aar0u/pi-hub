@@ -195,14 +195,33 @@ function scrollChatToBottom(force = false) {
   if (force || state.autoScroll) $("chat").scrollTop = $("chat").scrollHeight;
 }
 
+function foldingState() {
+  const collapsed = new Set();
+  for (const el of $("chat").querySelectorAll(".msg.collapsed")) {
+    const key = el.dataset.ids || el.dataset.id;
+    if (key) collapsed.add(key);
+  }
+  return collapsed;
+}
+
+function restoreFoldingState(collapsed) {
+  if (!collapsed) return;
+  for (const el of $("chat").querySelectorAll(".msg")) {
+    const key = el.dataset.ids || el.dataset.id;
+    if (key && collapsed.has(key)) setMessageCollapsed(el, true);
+  }
+}
+
 function renderState(data, opts = {}) {
   const chat = $("chat");
   const prevScrollTop = chat.scrollTop;
   const prevScrollHeight = chat.scrollHeight;
+  const collapsed = opts.preserveFolding ? foldingState() : null;
   updateChrome(data);
   chat.innerHTML = "";
   if (data.turns) renderChatTurns(data.turns, chat);
   else renderMessageRuns(data.messages || [], chat);
+  restoreFoldingState(collapsed);
   updateResponsesFoldToggle();
   if (opts.preserveScroll) {
     chat.scrollTop = prevScrollTop + (chat.scrollHeight - prevScrollHeight);
@@ -715,12 +734,24 @@ function markBackendOffline() {
   setStatus(BACKEND_OFFLINE_MESSAGE, "error", { backendOffline: true });
 }
 
+function stateFingerprint(data) {
+  const messages = data?.messages || [];
+  const last = messages[messages.length - 1] || null;
+  return [data?.sessionFile || "", data?.leafId || "", messages.length, last?.id || "", last?.timestamp || ""].join("|");
+}
+
 async function checkBackend() {
   if (state.streaming) return;
   try {
     const data = await api("/api/state");
     const wasOffline = state.backendOffline;
+    const changed = stateFingerprint(data) !== stateFingerprint(state.data);
     state.backendOffline = false;
+    await loadSessions().catch(() => {});
+    if (changed) {
+      renderState(data, { preserveFolding: true, preserveScroll: !state.autoScroll });
+      return;
+    }
     if (wasOffline) updateChrome(data);
   } catch (err) {
     markBackendOffline();
@@ -837,6 +868,70 @@ function appendTreeItem(container, item) {
   for (const child of childBranches) appendTreeItem(childContainer, child);
 }
 
+async function renderTasksPanel() {
+  const panel = $("systemPanel");
+  panel.innerHTML = "Loading tasks…";
+  panel.classList.add("empty");
+  try {
+    const data = await api("/api/tasks");
+    panel.classList.remove("empty");
+    panel.innerHTML = "";
+    const root = document.createElement("div");
+    root.className = "tasks-view";
+
+    const hint = document.createElement("div");
+    hint.className = "small";
+    hint.textContent = "Create tasks from chat with /schedule, then manage them here.";
+    root.append(hint);
+
+    if (!data.tasks?.length) {
+      const empty = document.createElement("div");
+      empty.className = "small";
+      empty.textContent = "No scheduled tasks yet.";
+      root.append(empty);
+    }
+
+    for (const task of data.tasks || []) {
+      const row = document.createElement("div");
+      row.className = "task-row";
+      const head = document.createElement("div");
+      head.className = "task-head";
+      const id = document.createElement("span");
+      id.className = "task-id";
+      id.textContent = task.id;
+      const status = document.createElement("span");
+      status.className = "task-status";
+      status.textContent = `${task.confirmed ? task.status : "pending"} · ${task.cron}`;
+      head.append(id, status);
+      const promptText = document.createElement("div");
+      promptText.className = "task-prompt";
+      promptText.textContent = task.prompt;
+      const meta = document.createElement("div");
+      meta.className = "task-meta";
+      meta.textContent = `session ${task.sessionName || task.sessionId || "unbound"} · next ${task.nextRunAt || "—"} · last ${task.lastRunAt || "—"}${task.lastResult?.summary ? ` · ${task.lastResult.summary}` : ""}`;
+      const actions = document.createElement("div");
+      actions.className = "task-actions";
+      const patch = (body) => api("/api/tasks", { method: "PATCH", body: JSON.stringify({ id: task.id, ...body }) });
+      const actionButton = (label, fn) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.onclick = async () => { await fn(); await renderTasksPanel(); };
+        return button;
+      };
+      actions.append(actionButton(task.status === "enabled" ? "Disable" : "Enable", () => patch({ status: task.status === "enabled" ? "disabled" : "enabled", confirmed: true })));
+      if (!task.confirmed) actions.append(actionButton("Confirm", () => patch({ confirmed: true, status: "enabled" })));
+      actions.append(actionButton("Delete", () => api(`/api/tasks?id=${encodeURIComponent(task.id)}`, { method: "DELETE" })));
+      row.append(head, promptText, meta, actions);
+      root.append(row);
+    }
+    panel.append(root);
+  } catch (err) {
+    panel.classList.add("empty");
+    panel.textContent = errorMessage(err);
+  }
+}
+
 function renderTreePanel(data = state.data) {
   const panel = $("systemPanel");
   panel.innerHTML = "";
@@ -863,6 +958,10 @@ function updateInspectorPanel(data = state.data) {
   if (!panel || panel.hidden) return;
   if (state.inspector === "tree") {
     renderTreePanel(data);
+    return;
+  }
+  if (state.inspector === "tasks") {
+    void renderTasksPanel();
     return;
   }
   if (state.inspector === "request" || state.inspector === "debug") return;
@@ -901,7 +1000,11 @@ async function loadCwdOptions() {
 }
 
 async function loadSlashCommands() {
-  state.slashCommands = await api("/api/commands");
+  const commands = await api("/api/commands");
+  state.slashCommands = [
+    { name: "schedule", description: "Create a scheduled task from natural language", source: "pi-hub" },
+    ...commands.filter((command) => command.name !== "schedule"),
+  ];
   renderSlashMenu();
 }
 
@@ -1025,6 +1128,32 @@ const doEditHere = async (entryId) => {
 
 loadFiles = createFileSidebar({ state, api, $, errorMessage, insertPromptText });
 loadSessions = createSessionSidebar({ state, api, $, icon, runAction, refresh, renderState, updateSidebarData });
+
+function scheduleRequestText(text) {
+  const match = text.match(/^\/schedule\s+([\s\S]+)$/i);
+  return match?.[1]?.trim() || "";
+}
+
+async function sendScheduleRequest(text) {
+  state.streaming = true;
+  state.abortRequested = false;
+  setStreamingUi(true);
+  const token = setStatus("Asking pi to create a scheduled task…", "warning", { busy: true });
+  try {
+    const result = await api("/api/tasks/propose", { method: "POST", body: JSON.stringify({ text }) });
+    if (result.state) renderState(result.state, { preserveFolding: true });
+    if (result.task) flashStatus("pi created a pending task. Confirm it in Tasks to enable.", "notice");
+    else flashStatus(result.proposal?.question || "pi needs more information.", "warning");
+    await updateSidebarData();
+  } catch (err) {
+    flashStatus(errorMessage(err), "error");
+    await syncStateWithoutRerender().catch(() => markBackendOffline());
+  } finally {
+    clearStatus(token);
+    state.streaming = false;
+    setStreamingUi(false);
+  }
+}
 
 function waitingText(startedAt = Date.now()) {
   const dots = ".".repeat((Math.floor((Date.now() - startedAt) / 500) % 3) + 1);
@@ -1187,7 +1316,7 @@ async function sendPrompt(text) {
     state.abortRequested = false;
     setStreamingUi(false);
     if (latestPromptState) {
-      renderState(latestPromptState);
+      renderState(latestPromptState, { preserveFolding: true });
       await updateSidebarData().catch(() => markBackendOffline());
     } else {
       await syncStateWithoutRerender().catch(() => markBackendOffline());
@@ -1211,7 +1340,9 @@ $("promptForm").onsubmit = async (ev) => {
   if (!text) return;
   hideSlashMenu();
   $("prompt").value = "";
-  await sendPrompt(text);
+  const scheduleText = scheduleRequestText(text);
+  if (scheduleText) await sendScheduleRequest(scheduleText);
+  else await sendPrompt(text);
 };
 $("prompt").addEventListener("compositionstart", () => state.composing = true);
 $("prompt").addEventListener("compositionend", () => state.composing = false);
@@ -1271,6 +1402,7 @@ function closeInspector() {
   panel.hidden = true;
   $("systemToggle").classList.remove("active");
   $("treeToggle").classList.remove("active");
+  $("tasksToggle").classList.remove("active");
 }
 
 function toggleInspector(kind) {
@@ -1284,15 +1416,17 @@ function toggleInspector(kind) {
   panel.hidden = false;
   $("systemToggle").classList.toggle("active", kind === "system");
   $("treeToggle").classList.toggle("active", kind === "tree");
+  $("tasksToggle").classList.toggle("active", kind === "tasks");
   updateInspectorPanel();
 }
 
 $("responsesFoldToggle").onclick = toggleAllResponses;
 $("systemToggle").onclick = () => toggleInspector("system");
 $("treeToggle").onclick = () => toggleInspector("tree");
+$("tasksToggle").onclick = () => toggleInspector("tasks");
 document.addEventListener("click", (ev) => {
   if ($("systemPanel").hidden) return;
-  if (ev.target.closest("#systemPanel, #responsesFoldToggle, #systemToggle, #treeToggle")) return;
+  if (ev.target.closest("#systemPanel, #responsesFoldToggle, #systemToggle, #treeToggle, #tasksToggle")) return;
   closeInspector();
 });
 

@@ -80,6 +80,17 @@ main { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr
 .tree-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-id { display: none; position: absolute; z-index: 2; right: 6px; bottom: calc(100% + 3px); max-width: min(420px, 90%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid #d8d0c3; border-radius: 6px; padding: 3px 5px; background: #25231f; color: #fffdf8; font-size: 10px; box-shadow: 0 6px 18px #0000000a; }
 .tree-row:hover .tree-id { display: block; }
+.tasks-view { display: flex; flex-direction: column; gap: 8px; font-family: var(--font-ui); white-space: normal; }
+.task-create { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; }
+.task-create input { font-size: 12px; }
+.task-row { border: 1px solid #eee5d8; border-radius: 9px; padding: 8px; background: #fffaf2; display: grid; gap: 6px; }
+.task-head { display: flex; gap: 8px; justify-content: space-between; align-items: baseline; font-size: 12px; }
+.task-id { font-family: var(--font-mono); color: #7b5520; }
+.task-status { color: #6f6558; }
+.task-prompt { color: #25231f; }
+.task-meta { color: #8a7d6d; font-size: 11px; }
+.task-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+.task-actions button { padding: 2px 7px; font-size: 11px; }
 .status.status-notice { --status-bg: #e2cfaa; --status-fg: #25231f; }
 .status.status-warning { --status-bg: #f0d4a2; --status-fg: #5f3608; }
 .status.status-error { --status-bg: var(--danger-bg); --status-fg: var(--danger-fg); }

@@ -19,6 +19,38 @@ pnpm start
 
 Set `PORT` to override the default `8787`. The server binds to `127.0.0.1` by default.
 
+## Scheduled tasks
+
+Scheduled tasks use 5-field cron syntax and are persisted locally:
+
+- `data/tasks.json` — task definitions
+- `data/task-runs.jsonl` — execution summaries
+
+Create scheduled tasks from the Web chat with `/schedule <natural-language request>`, for example `/schedule 每天早上 9 点总结项目状态`. pi converts it into a pending cron task in the same conversation; confirm it in the `Tasks` panel to enable. The `Tasks` panel is only for managing tasks. Each task is pinned to the session that created the proposal, so scheduled runs do not land in whichever conversation happens to be open later. Scheduled prompts defer until pi is idle so they do not interrupt active Web prompts.
+
+## Telegram bot
+
+Telegram support is optional. Enable it with:
+
+```bash
+TELEGRAM_BOT_TOKEN=<bot-token> pnpm start
+```
+
+Set `TELEGRAM_CHAT_ID=<chat-id>` to restrict the bot to one chat.
+
+Commands:
+
+```text
+/schedule every 30 minutes summarize current project
+/tasks
+/confirm <task_id>
+/enable <task_id>
+/disable <task_id>
+/delete <task_id>
+```
+
+Web and Telegram task creation both start with natural language and ask pi to produce the cron-backed task proposal. Created tasks start disabled and require confirmation. Ordinary Telegram messages are queued when pi is busy and are sent as plain-text-friendly prompts.
+
 Remote access is disabled by default. For trusted LAN-only access, bind a non-loopback `HOST` with `PI_HUB_ALLOW_REMOTE=1`:
 
 ```bash
