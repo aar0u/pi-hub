@@ -45,7 +45,7 @@ export function startScheduler({ taskStore, runner, intervalMs = DEFAULT_INTERVA
       await taskStore.appendRun(run);
       await taskStore.update(task.id, { lastResult: run });
       logEvent?.("task", `success ${task.id}`);
-      await notifyTaskTelegram(task, `Scheduled task ${task.id} completed.\n\n${notification}`);
+      await notifyTaskTelegram(task, notification);
     } catch (error) {
       const finishedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : String(error);

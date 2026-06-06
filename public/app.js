@@ -34,7 +34,6 @@ function textOfTreeContent(content) {
   return content
     .map((part) => {
       if (part && typeof part === "object" && typeof part.text === "string") return part.text;
-      if (part && typeof part === "object" && typeof part.thinking === "string") return part.thinking;
       if (part && typeof part === "object" && typeof part.name === "string") {
         const details = shortJson(part.input ?? part.arguments ?? part.args);
         return details ? `[tool: ${part.name}] ${details}` : `[tool: ${part.name}]`;
@@ -45,16 +44,15 @@ function textOfTreeContent(content) {
     .join("\n");
 }
 
-function isToolOnlyTreeContent(content) {
+function isInternalOnlyTreeContent(content) {
   if (!Array.isArray(content) || !content.length) return false;
-  let hasTool = false;
+  let hasInternal = false;
   for (const part of content) {
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string" && part.text.trim()) return false;
-    if (typeof part.thinking === "string" && part.thinking.trim()) return false;
-    if (typeof part.name === "string" && part.name) hasTool = true;
+    if ((typeof part.thinking === "string" && part.thinking.trim()) || (typeof part.name === "string" && part.name)) hasInternal = true;
   }
-  return hasTool;
+  return hasInternal;
 }
 
 function shouldShowTreeItem(item) {
@@ -63,7 +61,7 @@ function shouldShowTreeItem(item) {
   if (role === "user") return true;
   if (role !== "assistant") return false;
   if (item.message.errorMessage || item.message.isError) return true;
-  return !isToolOnlyTreeContent(item.message.content);
+  return !isInternalOnlyTreeContent(item.message.content);
 }
 
 function treeItemText(item) {
@@ -272,10 +270,24 @@ function splitAssistantParts(text) {
   return parts;
 }
 
+function thinkingPreview(text) {
+  const firstLine = String(text || "").split("\n").map((line) => line.trim()).find(Boolean) || "";
+  return firstLine
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\*\*(.*?)\*\*$/, "$1")
+    .replace(/^__(.*?)__$/, "$1")
+    .trim();
+}
+
 function toolPreview(command, name) {
   return (command || "")
     .replace(new RegExp(`^[✓▶…]\\s*${name || ""}\\s*(queued|running|done|update)?\\s*`, "i"), "")
     .trim();
+}
+
+function toolCommandText(part) {
+  if (part?.name === "thinking") return part.call || thinkingPreview(part.results?.join("\n\n")) || "thinking";
+  return part?.call || part?.name || "tool";
 }
 
 function appendToolSummary(summary, label, command, name) {
@@ -529,13 +541,13 @@ function addAssistantTurnFromParts(turn, opts = {}) {
     const tool = document.createElement("details");
     tool.className = `turn-tool ${part.error ? "error" : ""}`;
     const summary = document.createElement("summary");
-    appendToolSummary(summary, part.name || "tool", part.call, part.name);
+    appendToolSummary(summary, part.name || "tool", toolCommandText(part), part.name);
     addToolInspect(summary, `Tool: ${part.name || "tool"}`, { type: "tool", ids, part });
     const content = document.createElement("div");
     content.className = "turn-tool-body";
     const command = document.createElement("div");
     command.className = "turn-tool-command";
-    command.textContent = part.call || part.name || "tool";
+    command.textContent = toolCommandText(part);
     const result = document.createElement("div");
     result.className = "turn-tool-result";
     result.textContent = part.results?.length ? part.results.join("\n\n") : "(no output)";
@@ -598,13 +610,13 @@ function addAssistantTurn(messages, opts = {}) {
     const tool = document.createElement("details");
     tool.className = `turn-tool ${part.error ? "error" : ""}`;
     const summary = document.createElement("summary");
-    appendToolSummary(summary, part.name, part.call, part.name);
+    appendToolSummary(summary, part.name, toolCommandText(part), part.name);
     addToolInspect(summary, `Tool: ${part.name || "tool"}`, { type: "tool", ids, part });
     const content = document.createElement("div");
     content.className = "turn-tool-body";
     const command = document.createElement("div");
     command.className = "turn-tool-command";
-    command.textContent = part.call || part.name;
+    command.textContent = toolCommandText(part);
     const result = document.createElement("div");
     result.className = "turn-tool-result";
     result.textContent = part.results.length ? part.results.join("\n\n") : "(no output)";
@@ -1238,6 +1250,11 @@ async function sendPrompt(text) {
     }
   }, 500);
   const appendTextDelta = (delta) => {
+    if (activeToolPart?.name === "thinking" && activeToolPart.phase !== "done") {
+      activeToolPart.phase = "done";
+      activeToolPart.endedAt = Date.now();
+      activeToolPart = null;
+    }
     output += delta;
     let part = streamParts[streamParts.length - 1];
     if (!part || part.type !== "text") {
@@ -1248,18 +1265,19 @@ async function sendPrompt(text) {
   };
   const appendToolEvent = (evt) => {
     const name = evt.toolName || activeToolPart?.name || "tool";
-    if (!activeToolPart || activeToolPart.phase === "done") {
+    if (!activeToolPart || activeToolPart.phase === "done" || (evt.toolName && activeToolPart.name !== evt.toolName)) {
       activeToolPart = { type: "tool", name, phase: evt.phase || "running", createdAt: Date.now(), startedAt: null, endedAt: null, command: "", messages: [], error: false };
       streamParts.push(activeToolPart);
     }
     activeToolPart.name = name;
-    activeToolPart.phase = evt.phase || activeToolPart.phase || "running";
+    activeToolPart.phase = evt.phase === "update" ? (activeToolPart.phase === "done" ? "done" : "running") : (evt.phase || activeToolPart.phase || "running");
     if (activeToolPart.phase === "running" && !activeToolPart.startedAt) activeToolPart.startedAt = Date.now();
     if (activeToolPart.phase === "done" && !activeToolPart.endedAt) activeToolPart.endedAt = Date.now();
     activeToolPart.error = Boolean(evt.isError || activeToolPart.error);
     if (evt.message) {
       if (evt.phase === "queued" || evt.phase === "running") activeToolPart.command = evt.message;
       else activeToolPart.messages.push(evt.message);
+      if (activeToolPart.name === "thinking") activeToolPart.command = thinkingPreview(activeToolPart.messages.join("")) || activeToolPart.command;
     }
   };
   const renderAssistant = () => {
@@ -1291,7 +1309,7 @@ async function sendPrompt(text) {
       content.className = "turn-tool-body";
       const command = document.createElement("div");
       command.className = "turn-tool-command";
-      command.textContent = part.command || part.name || "tool";
+      command.textContent = part.name === "thinking" ? (part.command || thinkingPreview(part.messages.join("")) || "thinking") : (part.command || part.name || "tool");
       const result = document.createElement("div");
       result.className = "turn-tool-result";
       result.textContent = part.messages.length ? part.messages.join("\n\n") : (part.phase === "done" ? "(no output)" : "running…");

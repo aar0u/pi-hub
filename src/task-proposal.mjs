@@ -64,9 +64,10 @@ export async function createTaskProposal({ text, source, telegramChatId = null, 
   const cron = assertCron(proposal.cron);
   if (typeof proposal.prompt !== "string" || !proposal.prompt.trim()) throw new HttpError(400, "pi task proposal did not include a prompt");
   if (isolated && typeof createIsolatedBinding !== "function") throw new HttpError(500, "Isolated task sessions are not available");
+  const taskPrompt = proposal.prompt.trim();
   const binding = isolated ? await createIsolatedBinding({ source, telegramChatId }) : (existingBinding || sessionBinding(result.state));
   const task = await taskStore.create({
-    prompt: proposal.prompt.trim(),
+    prompt: taskPrompt,
     cron,
     source,
     confirmed: false,
@@ -74,5 +75,5 @@ export async function createTaskProposal({ text, source, telegramChatId = null, 
     telegramChatId,
     ...binding,
   });
-  return { task, proposal: { ...proposal, cron, prompt: proposal.prompt.trim(), isolated }, assistantText, state: result.state };
+  return { task, proposal: { ...proposal, cron, prompt: taskPrompt, isolated }, assistantText, state: result.state };
 }

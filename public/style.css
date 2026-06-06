@@ -141,10 +141,11 @@ main { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr
 .turn-tool { border: 1px solid #eee5d8; border-radius: 10px; background: #faf7f0; padding: 7px 9px; color: #6f6558; }
 .turn-tool.error { border-color: #d29288; background: #fff7f5; }
 .turn-tool summary { cursor: pointer; font-size: 12px; font-weight: 650; display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.tool-inspect { border: 0; background: transparent; padding: 0 3px; color: #8a7d6d; font-size: 11px; font-weight: 400; }
+.tool-inspect { margin-left: auto; flex: 0 0 auto; border: 0; background: transparent; padding: 0 3px; color: #8a7d6d; font-size: 11px; font-weight: 400; }
 .tool-inspect:hover { background: transparent; color: #8f6527; }
 .turn-tool-name { flex: 0 0 auto; }
 .turn-tool-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; color: #8a7d6d; font-family: var(--font-mono); font-size: 11px; font-weight: 400; }
+.turn-tool[open] .turn-tool-preview { display: none; }
 .turn-tool-body { margin-top: 7px; white-space: pre-wrap; color: #4f483f; display: flex; flex-direction: column; gap: 7px; }
 .turn-tool-command { font-family: var(--font-mono); font-size: 11px; color: #6f6558; }
 .turn-tool-result { border-top: 1px solid #eee5d8; padding-top: 7px; }

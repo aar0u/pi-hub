@@ -30,6 +30,7 @@ function sleep(ms) {
 }
 
 function currentState() {
+  repairSyntheticAssistantUsage(runtime);
   return sessionPayload(runtime);
 }
 
@@ -153,6 +154,7 @@ async function runPromptText({ text, source = "api", taskId = null, telegramChat
   const { activeRuntime, activeSession } = beginPrompt();
   const startedAt = new Date().toISOString();
   logEvent("prompt", `start ${source}${taskId ? ` task=${taskId}` : ""}`);
+  repairSyntheticAssistantUsage(activeRuntime);
   try {
     await activeSession.prompt(text.trim());
     const state = sessionPayload(activeRuntime);
@@ -176,6 +178,7 @@ async function runTelegramPromptText({ text, source = "telegram", telegramChatId
   const startedAt = new Date().toISOString();
   logEvent("prompt", `start ${source}`);
   const unsubscribe = observePromptEvents(telegramRuntime.session, logEvent);
+  repairSyntheticAssistantUsage(telegramRuntime);
   try {
     await telegramRuntime.session.prompt(text.trim());
     const state = sessionPayload(telegramRuntime);
@@ -227,6 +230,76 @@ async function refreshActiveRuntimeIfSessionChanged(sessionFile, nextCwd) {
   await oldRuntime.dispose().catch(() => {});
 }
 
+function scheduledTaskRunMessage(task, finishedAt, includePrompt = false) {
+  return [
+    `Scheduled run · ${task.id}`,
+    finishedAt,
+    includePrompt ? `Prompt: ${truncateText(task.prompt, 500)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function scheduledTaskResultMessage(task, resultText) {
+  const text = truncateText(resultText || "Completed");
+  return [
+    `Scheduled result · ${task.id}`,
+    "",
+    text,
+  ].join("\n");
+}
+
+function syntheticUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function syntheticAssistantMessage(text) {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    usage: syntheticUsage(),
+  };
+}
+
+function repairSyntheticAssistantUsage(targetRuntime) {
+  const manager = targetRuntime?.session?.sessionManager;
+  let changed = false;
+  for (const entry of manager?.getEntries?.() || []) {
+    if (entry.type !== "message" || entry.message?.role !== "assistant" || entry.message.usage) continue;
+    entry.message.usage = syntheticUsage();
+    changed = true;
+  }
+  if (changed) manager?._rewriteFile?.();
+}
+
+async function appendTaskResultToBoundSession(task, resultText, finishedAt) {
+  const appendTo = (targetRuntime) => {
+    const entries = targetRuntime.session.sessionManager.getEntries?.() || [];
+    const includePrompt = !entries.some((entry) => entry.type === "message");
+    targetRuntime.session.sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: scheduledTaskRunMessage(task, finishedAt, includePrompt) }],
+    });
+    repairSyntheticAssistantUsage(targetRuntime);
+    targetRuntime.session.sessionManager.appendMessage(syntheticAssistantMessage(scheduledTaskResultMessage(task, resultText)));
+    return sessionPayload(targetRuntime);
+  };
+  if (resolve(runtime.session.sessionFile || "") === resolve(task.sessionFile)) return appendTo(runtime);
+
+  let boundRuntime = null;
+  try {
+    boundRuntime = await makeRuntime(task.cwd, SessionManager.open(task.sessionFile));
+    return appendTo(boundRuntime);
+  } finally {
+    await boundRuntime?.dispose().catch(() => {});
+  }
+}
+
 async function runTaskPromptText({ text, task, source = "scheduler" }) {
   if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "Message is empty");
   if (!task?.sessionFile || !task?.cwd) throw new HttpError(409, "Scheduled task has no bound session; recreate it so it can be pinned to a conversation");
@@ -237,18 +310,20 @@ async function runTaskPromptText({ text, task, source = "scheduler" }) {
   let shouldRefreshActiveRuntime = false;
   try {
     shouldRefreshActiveRuntime = runtime.session.sessionFile === task.sessionFile;
-    taskRuntime = await makeRuntime(task.cwd, SessionManager.open(task.sessionFile));
+    taskRuntime = await makeRuntime(task.cwd, SessionManager.inMemory(task.cwd));
     const unsubscribe = observePromptEvents(taskRuntime.session, logEvent);
     const startedAt = new Date().toISOString();
     try {
-      await taskRuntime.session.prompt(text.trim());
+      await taskRuntime.session.prompt(`${text.trim()}\n\nKeep the final scheduled task result concise. Do not include raw tool outputs or long source snippets.`);
     } finally {
       unsubscribe();
     }
-    const state = sessionPayload(taskRuntime);
-    logLargeTokenUsage(`task ${task.id}`, state);
-    return { source, taskId: task.id, startedAt, finishedAt: new Date().toISOString(), state, text: lastMessageText(state), summary: summarizeState(state) };
-  } finally {
+    const ephemeralState = sessionPayload(taskRuntime);
+    logLargeTokenUsage(`task ${task.id}`, ephemeralState);
+    const resultText = lastMessageText(ephemeralState);
+    const finishedAt = new Date().toISOString();
+    const state = await appendTaskResultToBoundSession(task, resultText, finishedAt);
+    return { source, taskId: task.id, startedAt, finishedAt, state, text: scheduledTaskResultMessage(task, resultText), summary: summarizeState(ephemeralState) };  } finally {
     await taskRuntime?.dispose().catch(() => {});
     operationState = "idle";
     if (shouldRefreshActiveRuntime) await refreshActiveRuntimeIfSessionChanged(task.sessionFile, task.cwd);
@@ -339,6 +414,11 @@ function logEvent(kind, message) {
 function formatK(value) {
   if (!Number.isFinite(value)) return "?";
   return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, "")}k` : String(value);
+}
+
+function truncateText(value, max = 6_000) {
+  const text = String(value || "").trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 function tokenCount(stats) {

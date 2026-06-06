@@ -19,7 +19,6 @@ export function textOfContent(content) {
   return content
     .map((part) => {
       if (part && typeof part === "object" && "text" in part && typeof part.text === "string") return part.text;
-      if (part && typeof part === "object" && "thinking" in part && typeof part.thinking === "string") return part.thinking;
       if (part && typeof part === "object" && "name" in part && typeof part.name === "string") return toolPartText(part);
       return "";
     })
@@ -75,7 +74,7 @@ function contentParts(content) {
   for (const part of content) {
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string" && part.text) parts.push({ type: "text", text: part.text });
-    else if (typeof part.thinking === "string" && part.thinking) parts.push({ type: "text", text: part.thinking });
+    else if (typeof part.thinking === "string" && part.thinking) parts.push({ type: "tool", name: "thinking", call: "", results: [part.thinking], error: false });
     else if (typeof part.name === "string") {
       const details = shortJson(part.input ?? part.arguments ?? part.args);
       parts.push({ type: "tool", name: part.name, call: details, results: [], error: false });

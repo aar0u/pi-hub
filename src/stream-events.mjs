@@ -79,7 +79,7 @@ function writeAssistantUpdate(write, update, onEvent = null) {
     return;
   }
   if (update?.type === "thinking_delta") {
-    write?.({ type: "delta", delta: update.delta ?? update.thinking });
+    write?.({ type: "tool", phase: "update", toolName: "thinking", message: update.delta ?? update.thinking });
     return;
   }
   if (update?.type === "toolcall_start") {
