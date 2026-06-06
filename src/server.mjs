@@ -30,7 +30,6 @@ function sleep(ms) {
 }
 
 function currentState() {
-  repairSyntheticAssistantUsage(runtime);
   return sessionPayload(runtime);
 }
 
@@ -154,7 +153,6 @@ async function runPromptText({ text, source = "api", taskId = null, telegramChat
   const { activeRuntime, activeSession } = beginPrompt();
   const startedAt = new Date().toISOString();
   logEvent("prompt", `start ${source}${taskId ? ` task=${taskId}` : ""}`);
-  repairSyntheticAssistantUsage(activeRuntime);
   try {
     await activeSession.prompt(text.trim());
     const state = sessionPayload(activeRuntime);
@@ -178,7 +176,6 @@ async function runTelegramPromptText({ text, source = "telegram", telegramChatId
   const startedAt = new Date().toISOString();
   logEvent("prompt", `start ${source}`);
   const unsubscribe = observePromptEvents(telegramRuntime.session, logEvent);
-  repairSyntheticAssistantUsage(telegramRuntime);
   try {
     await telegramRuntime.session.prompt(text.trim());
     const state = sessionPayload(telegramRuntime);
@@ -266,17 +263,6 @@ function syntheticAssistantMessage(text) {
   };
 }
 
-function repairSyntheticAssistantUsage(targetRuntime) {
-  const manager = targetRuntime?.session?.sessionManager;
-  let changed = false;
-  for (const entry of manager?.getEntries?.() || []) {
-    if (entry.type !== "message" || entry.message?.role !== "assistant" || entry.message.usage) continue;
-    entry.message.usage = syntheticUsage();
-    changed = true;
-  }
-  if (changed) manager?._rewriteFile?.();
-}
-
 async function appendTaskResultToBoundSession(task, resultText, finishedAt) {
   const appendTo = (targetRuntime) => {
     const entries = targetRuntime.session.sessionManager.getEntries?.() || [];
@@ -285,7 +271,6 @@ async function appendTaskResultToBoundSession(task, resultText, finishedAt) {
       role: "user",
       content: [{ type: "text", text: scheduledTaskRunMessage(task, finishedAt, includePrompt) }],
     });
-    repairSyntheticAssistantUsage(targetRuntime);
     targetRuntime.session.sessionManager.appendMessage(syntheticAssistantMessage(scheduledTaskResultMessage(task, resultText)));
     return sessionPayload(targetRuntime);
   };

@@ -31,14 +31,6 @@ function systemPromptOf(session) {
   return state && "systemPrompt" in state ? (state.systemPrompt ?? "") : null;
 }
 
-function safeSessionStats(session) {
-  try {
-    return session.getSessionStats?.() ?? null;
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
 function modelPayload(model) {
   if (!model) return null;
   return {
@@ -178,7 +170,7 @@ export function sessionPayload(runtime) {
     isStreaming: session.isStreaming,
     model: modelPayload(session.model),
     thinkingLevel: session.thinkingLevel,
-    stats: safeSessionStats(session),
+    stats: session.getSessionStats?.() ?? null,
     systemPrompt: systemPromptOf(session),
     messages: activeEntries.map((entry) => toMessage(entry)),
     turns: chatTurns(activeEntries, toMessage),
