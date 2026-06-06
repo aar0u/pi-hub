@@ -42,15 +42,16 @@ function subscribePromptEventSink(session, { write = null, getState = null, onEv
         writeAssistantUpdate(write, event.assistantMessageEvent, onEvent);
         return;
       case "tool_execution_start":
-        write?.({ type: "tool", phase: "running", toolName: event.toolName, message: toolMessage("running", event.toolName, event.args) });
+        write?.({ type: "tool", phase: "running", toolCallId: event.toolCallId, toolName: event.toolName, message: toolMessage("running", event.toolName, event.args) });
         return;
       case "tool_execution_update":
-        write?.({ type: "tool", phase: "update", toolName: event.toolName, message: textOfContent(event.partialResult?.content) });
+        write?.({ type: "tool", phase: "update", toolCallId: event.toolCallId, toolName: event.toolName, message: textOfContent(event.partialResult?.content) });
         return;
       case "tool_execution_end":
         write?.({
           type: "tool",
           phase: "done",
+          toolCallId: event.toolCallId,
           toolName: event.toolName,
           isError: event.isError,
           message: toolMessage("done", event.toolName, event.isError ? "error" : textOfContent(event.result?.content)),
@@ -78,11 +79,20 @@ function writeAssistantUpdate(write, update, onEvent = null) {
     write?.({ type: "delta", delta: update.delta });
     return;
   }
+  if (update?.type === "thinking_start") {
+    write?.({ type: "tool", phase: "running", toolName: "thinking", contentIndex: update.contentIndex });
+    return;
+  }
   if (update?.type === "thinking_delta") {
-    write?.({ type: "tool", phase: "update", toolName: "thinking", message: update.delta ?? update.thinking });
+    write?.({ type: "tool", phase: "update", toolName: "thinking", contentIndex: update.contentIndex, message: update.delta ?? update.thinking });
+    return;
+  }
+  if (update?.type === "thinking_end") {
+    write?.({ type: "tool", phase: "done", toolName: "thinking", contentIndex: update.contentIndex, message: update.content });
     return;
   }
   if (update?.type === "toolcall_start") {
+    write?.({ type: "tool", phase: "queued", contentIndex: update.contentIndex });
     return;
   }
   if (update?.type === "toolcall_end" && update.toolCall) {
@@ -91,6 +101,8 @@ function writeAssistantUpdate(write, update, onEvent = null) {
     write?.({
       type: "tool",
       phase: "queued",
+      toolCallId: update.toolCall.id,
+      contentIndex: update.contentIndex,
       toolName: update.toolCall.name,
       message: toolMessage("queued", update.toolCall.name, update.toolCall.arguments),
     });

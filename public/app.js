@@ -214,8 +214,21 @@ function defaultTurnBlockOpen() {
   return false;
 }
 
+function normalizeStreamPhase(phase) {
+  if (phase === "done") return "done";
+  if (phase === "queued") return "queued";
+  return "running";
+}
+
 function defaultStreamPartOpen(part) {
-  return part.phase !== "done";
+  return normalizeStreamPhase(part.phase) !== "done";
+}
+
+function streamPhaseText(part) {
+  const phase = normalizeStreamPhase(part.phase);
+  if (phase === "done") return formatDuration((part.endedAt || Date.now()) - (part.startedAt || part.createdAt));
+  if (phase === "running") return `running ${formatDuration(Date.now() - (part.startedAt || part.createdAt))}`;
+  return "queued";
 }
 
 function setDetailsFoldState(el, key, defaultOpen, overrides = state.detailFoldOverrides) {
@@ -1275,6 +1288,7 @@ async function sendPrompt(text) {
   let output = "";
   const streamParts = [];
   const streamDetails = new Map();
+  const streamToolParts = new Map();
   let activeToolPart = null;
   let gotVisibleResponse = false;
   let streamWarningShown = false;
@@ -1295,12 +1309,14 @@ async function sendPrompt(text) {
       setStatus("No stream updates; backend/tool may be stuck.", "warning");
     }
   }, 500);
+  const finishStreamPart = (part) => {
+    if (!part || part.phase === "done") return;
+    part.phase = "done";
+    part.endedAt = Date.now();
+    if (activeToolPart === part) activeToolPart = null;
+  };
   const appendTextDelta = (delta) => {
-    if (activeToolPart?.type === "thinking" && activeToolPart.phase !== "done") {
-      activeToolPart.phase = "done";
-      activeToolPart.endedAt = Date.now();
-      activeToolPart = null;
-    }
+    if (activeToolPart?.type === "thinking") finishStreamPart(activeToolPart);
     output += delta;
     let part = streamParts[streamParts.length - 1];
     if (!part || part.type !== "text") {
@@ -1309,26 +1325,36 @@ async function sendPrompt(text) {
     }
     part.text += delta;
   };
+  const streamToolKey = (evt, name, blockType) => {
+    if (evt.toolCallId) return `tool:${evt.toolCallId}`;
+    if (blockType === "thinking") return `thinking:${evt.contentIndex ?? "active"}`;
+    return activeToolPart?.type === blockType && activeToolPart.phase !== "done" ? activeToolPart.key : `tool:${name}`;
+  };
   const appendToolEvent = (evt) => {
     if (evt.phase === "queued" && !evt.toolName) return;
     const name = evt.toolName || activeToolPart?.name || "tool";
     const blockType = name === "thinking" ? "thinking" : "tool";
-    if (!activeToolPart || activeToolPart.phase === "done" || activeToolPart.type !== blockType || (evt.toolName && activeToolPart.name !== evt.toolName)) {
-      activeToolPart = { type: blockType, name, phase: evt.phase || "running", createdAt: Date.now(), startedAt: null, endedAt: null, command: "", messages: [], error: false };
-      streamParts.push(activeToolPart);
+    if (activeToolPart?.type === "thinking" && blockType !== "thinking") finishStreamPart(activeToolPart);
+    const key = streamToolKey(evt, name, blockType);
+    let part = streamToolParts.get(key);
+    if (!part || (part.phase === "done" && !evt.toolCallId)) {
+      part = { key, type: blockType, name, phase: normalizeStreamPhase(evt.phase), createdAt: Date.now(), startedAt: null, endedAt: null, command: "", messages: [], error: false };
+      streamToolParts.set(key, part);
+      streamParts.push(part);
     }
-    activeToolPart.name = name;
-    if (evt.phase !== "update") activeToolPart.phase = evt.phase || activeToolPart.phase || "running";
-    if (["queued", "running"].includes(activeToolPart.phase) && evt.phase === "update") activeToolPart.phase = "running";
-    if (activeToolPart.phase === "running" && !activeToolPart.startedAt) activeToolPart.startedAt = Date.now();
-    if (activeToolPart.phase === "done" && !activeToolPart.endedAt) activeToolPart.endedAt = Date.now();
-    activeToolPart.error = Boolean(evt.isError || activeToolPart.error);
+    part.name = name;
+    if (evt.phase !== "update") part.phase = normalizeStreamPhase(evt.phase || part.phase || "running");
+    if (["queued", "running"].includes(part.phase) && evt.phase === "update") part.phase = "running";
+    if (part.phase === "running" && !part.startedAt) part.startedAt = Date.now();
+    if (part.phase === "done" && !part.endedAt) part.endedAt = Date.now();
+    part.error = Boolean(evt.isError || part.error);
     if (evt.message) {
-      if (evt.phase === "queued" || evt.phase === "running") activeToolPart.command = evt.message;
-      else if (activeToolPart.type === "thinking") activeToolPart.messages[0] = `${activeToolPart.messages[0] || ""}${evt.message}`;
-      else activeToolPart.messages.push(evt.message);
-      if (activeToolPart.type === "thinking") activeToolPart.command = thinkingPreview(activeToolPart.messages[0] || "") || activeToolPart.command;
+      if (evt.phase === "queued" || evt.phase === "running") part.command = evt.message;
+      else if (part.type === "thinking") part.messages[0] = `${part.messages[0] || ""}${evt.message}`;
+      else part.messages.push(evt.message);
+      if (part.type === "thinking") part.command = thinkingPreview(part.messages[0] || "") || part.command;
     }
+    activeToolPart = part.phase === "done" ? [...streamParts].reverse().find((p) => p.type !== "text" && p.phase !== "done") || null : part;
   };
   const renderAssistant = () => {
     assistant.body.textContent = "";
@@ -1348,13 +1374,11 @@ async function sendPrompt(text) {
 
       const tool = document.createElement("details");
       tool.className = `${part.type === "thinking" ? "turn-thinking" : "turn-tool"} ${part.error ? "error" : ""}`;
-      const foldKey = `stream:${index}`;
+      const foldKey = `stream:${part.key || index}`;
       setDetailsFoldState(tool, foldKey, defaultStreamPartOpen(part), streamDetails);
       const summary = document.createElement("summary");
       trackDetailsFoldState(summary, tool, foldKey, streamDetails);
-      let phaseText = "queued";
-      if (part.phase === "done") phaseText = formatDuration((part.endedAt || Date.now()) - (part.startedAt || part.createdAt));
-      else if (part.phase === "running") phaseText = `running ${formatDuration(Date.now() - (part.startedAt || part.createdAt))}`;
+      const phaseText = streamPhaseText(part);
       const label = part.type === "thinking" ? "thinking" : (part.name || "tool");
       appendToolSummary(summary, `${label} · ${phaseText}`, part.command, part.name);
       addToolInspect(summary, `${part.type === "thinking" ? "Thinking" : "Tool"}: ${label}`, { type: `streaming-${part.type}`, part });
@@ -1409,9 +1433,7 @@ async function sendPrompt(text) {
       }
       if (evt.type === "done" || evt.type === "state") {
         if (activeToolPart && activeToolPart.phase !== "done") {
-          activeToolPart.phase = "done";
-          activeToolPart.endedAt = Date.now();
-          activeToolPart = null;
+          finishStreamPart(activeToolPart);
           renderAssistant();
         }
         if (evt.state) {
