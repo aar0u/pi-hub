@@ -53,6 +53,11 @@ main { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr
 .topbar { display: flex; align-items: center; border-bottom: 1px solid #ddd2c1; }
 .status { flex: 1; min-width: 0; padding: 8px 14px; font-size: 12px; color: #6f6558; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background .2s, color .2s; }
 .status.status-busy { background: var(--status-bg, #f0d4a2); color: var(--status-fg, #5f3608); font-weight: 650; }
+.usage-badge { align-self: stretch; min-width: 124px; border: 0; border-left: 1px solid #ddd2c1; border-radius: 0; background: #fbf6eb; padding: 0 10px; font-size: 12px; color: #6f6558; white-space: nowrap; }
+.usage-badge:hover { background: #f0e9dc; }
+.usage-badge.ok { color: #4f6d37; }
+.usage-badge.warning { color: #8f6527; }
+.usage-badge.error { color: #9f2f2d; background: #fff5f4; }
 .inspector-toggle { align-self: stretch; border: 0; border-left: 1px solid #ddd2c1; border-radius: 0; background: transparent; padding: 0 12px; font-size: 12px; color: #6f6558; }
 .inspector-toggle.active { background: #f0e9dc; color: #25231f; }
 .inspector-panel { position: absolute; z-index: 15; top: 38px; right: 12px; width: min(620px, calc(100% - 24px)); max-height: min(46vh, 420px); overflow: auto; border: 1px solid #d8d0c3; border-radius: 12px; padding: 10px; background: #fffdf8; color: #5f574d; box-shadow: 0 12px 36px #0000000a; font: 12px/1.5 var(--font-mono); white-space: pre-wrap; }

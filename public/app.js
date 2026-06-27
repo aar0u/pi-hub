@@ -7,11 +7,12 @@ import { $, compactText, compactUserRequest, formatDuration, icon, setIcon } fro
 
 installApiTokenFromHash();
 
-const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], slashCommands: [], slashIndex: 0, inspector: null, status: { persistent: null, flash: null }, detailFoldOverrides: new Map() };
+const state = { data: null, streaming: false, composing: false, abortController: null, abortRequested: false, autoScroll: true, backendOffline: false, filePath: ".", cwdChoices: [], slashCommands: [], slashIndex: 0, inspector: null, codexUsage: null, status: { persistent: null, flash: null }, detailFoldOverrides: new Map() };
 let loadFiles;
 let loadSessions;
 
 const BACKEND_CHECK_INTERVAL_MS = 5_000;
+const CODEX_USAGE_INTERVAL_MS = 120_000;
 
 function messageText(m) {
   if (m.error) return m.error;
@@ -759,6 +760,49 @@ function formatCost(value) {
   return Number.isFinite(value) && value > 0 ? `$${value.toFixed(value < 0.01 ? 4 : 2)}` : "";
 }
 
+function formatUsagePercent(value) {
+  if (!Number.isFinite(value)) return "?";
+  return `${Math.round(value)}%`;
+}
+
+function renderCodexUsage() {
+  const badge = $("codexUsage");
+  if (!badge) return;
+  const usage = state.codexUsage;
+  badge.classList.remove("ok", "warning", "error");
+
+  if (!usage) {
+    badge.textContent = "Usage …";
+    badge.title = "Codex usage";
+    return;
+  }
+
+  if (usage.error) {
+    badge.textContent = "Usage ?";
+    badge.title = usage.error;
+    badge.classList.add("error");
+    return;
+  }
+
+  const windows = usage.windows || [];
+  badge.textContent = windows.map((window) => `${window.label} ${formatUsagePercent(window.usedPercent)}`).join(" · ") || "Usage ?";
+  badge.title = windows.map((window) => window.text).join("\n");
+  badge.classList.add(windows.some((window) => window.usedPercent >= 80) ? "warning" : "ok");
+}
+
+async function updateCodexUsage({ loading = false } = {}) {
+  if (loading) {
+    state.codexUsage = null;
+    renderCodexUsage();
+  }
+  try {
+    state.codexUsage = await api("/api/codex-usage");
+  } catch (err) {
+    state.codexUsage = { error: errorMessage(err) };
+  }
+  renderCodexUsage();
+}
+
 function contextStatusText(contextUsage) {
   if (!contextUsage) return "context ?";
   const windowText = formatCount(contextUsage.contextWindow);
@@ -840,6 +884,12 @@ function stateFingerprint(data) {
   return [data?.sessionFile || "", data?.leafId || "", messages.length, last?.id || "", last?.timestamp || ""].join("|");
 }
 
+function sameConversation(a, b) {
+  if (!a || !b) return true;
+  if (a.sessionFile && b.sessionFile) return a.sessionFile === b.sessionFile;
+  return (a.cwd || "") === (b.cwd || "");
+}
+
 async function checkBackend() {
   if (state.streaming) return;
   try {
@@ -848,6 +898,7 @@ async function checkBackend() {
     const changed = stateFingerprint(data) !== stateFingerprint(state.data);
     state.backendOffline = false;
     await loadSessions().catch(() => {});
+    if (!sameConversation(data, state.data)) return;
     if (changed) {
       renderState(data, { preserveFolding: true, preserveScroll: !state.autoScroll });
       return;
@@ -1206,7 +1257,8 @@ async function refresh(opts = {}) {
 }
 
 async function syncStateWithoutRerender() {
-  updateChrome(await api("/api/state"));
+  const data = await api("/api/state");
+  if (sameConversation(data, state.data)) updateChrome(data);
   await updateSidebarData();
 }
 
@@ -1272,14 +1324,15 @@ async function sendPrompt(text) {
   setStreamingUi(true);
   addMessage({ role: "user", text });
   const startTime = Date.now();
-  const assistant = addMessage({ role: "assistant", text: activityText("waiting", startTime) }, { inspect: false });
+  const assistant = addMessage({ role: "assistant", text: activityText("sending request", startTime) }, { inspect: false });
   assistant.el.classList.add("streaming-waiting");
-  addMessageAction(assistant.el, "assistant", "Inspect stream", null, () => showDebugInspector("Streaming response", { type: "streaming-response", output, streamParts }));
+  addMessageAction(assistant.el, "assistant", "Inspect stream", null, () => showDebugInspector("Streaming response", { type: "streaming-response", output, streamParts, rawEvents: rawStreamEvents }));
   assistant.body.classList.add("turn-body");
   const controller = new AbortController();
   state.abortController = controller;
   let output = "";
   const streamParts = [];
+  const rawStreamEvents = [];
   const streamDetails = new Map();
   const streamToolParts = new Map();
   let nextStreamPartId = 0;
@@ -1287,20 +1340,30 @@ async function sendPrompt(text) {
   let gotVisibleResponse = false;
   let streamWarningShown = false;
   let latestPromptState = null;
+  let waitingLabel = "sending request";
+  let streamStatusToken = null;
   let lastStreamEventAt = Date.now();
+  let lastNonPingEventAt = Date.now();
+  const renderWaitingStatus = () => {
+    if (gotVisibleResponse) return;
+    const elapsed = formatDuration(Date.now() - startTime);
+    const heartbeatStale = Date.now() - lastStreamEventAt >= STREAM_AWARENESS_TIMEOUT_MS;
+    assistant.body.textContent = `${waitingLabel} · ${elapsed}${heartbeatStale ? " · no heartbeat" : ""}`;
+  };
+  renderWaitingStatus();
   const progressInterval = setInterval(() => {
-    const idleMs = Date.now() - lastStreamEventAt;
+    const idleMs = Date.now() - lastNonPingEventAt;
     if (!gotVisibleResponse) {
-      assistant.body.textContent = activityText("waiting", startTime);
+      renderWaitingStatus();
       if (idleMs > STREAM_AWARENESS_TIMEOUT_MS && !streamWarningShown) {
         streamWarningShown = true;
-        setStatus("No visible response yet; still waiting.", "warning");
+        streamStatusToken = setStatus("Connected, but no visible model/tool update yet.", "warning");
       }
       return;
     }
     if (activeToolPart && activeToolPart.phase !== "done") renderAssistant();
     if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
-      setStatus("No stream updates; backend/tool may be stuck.", "warning");
+      streamStatusToken = setStatus("No model/tool updates; backend/tool may be stuck.", "warning");
     }
   }, 500);
   const finishStreamPart = (part) => {
@@ -1399,7 +1462,9 @@ async function sendPrompt(text) {
     if (!assistant.body.childElementCount) assistant.body.textContent = activeToolPart ? "working…" : "waiting…";
   };
   const markVisible = () => {
+    if (gotVisibleResponse) return;
     gotVisibleResponse = true;
+    clearStatus(streamStatusToken);
     assistant.el.classList.remove("streaming-waiting");
   };
   try {
@@ -1411,8 +1476,26 @@ async function sendPrompt(text) {
     });
     if (!res.ok || !res.body) throw await responseError(res);
     await readNdjsonStream(res, (evt) => {
+      rawStreamEvents.push({ ...evt, receivedAt: Date.now() });
+      if (rawStreamEvents.length > 200) rawStreamEvents.shift();
       lastStreamEventAt = Date.now();
-      if (evt.type === "ping") return;
+      if (evt.type === "ping") {
+        renderWaitingStatus();
+        return;
+      }
+      lastNonPingEventAt = Date.now();
+      if (evt.type === "accepted") {
+        waitingLabel = "backend accepted, waiting for model";
+        streamStatusToken = setStatus("Request accepted; waiting for model/tool updates…", "notice", { busy: true });
+        renderWaitingStatus();
+        return;
+      }
+      if (evt.type === "message_start") {
+        waitingLabel = "model response started";
+        streamStatusToken = setStatus("Model response started…", "notice", { busy: true });
+        renderWaitingStatus();
+        return;
+      }
       if (evt.type === "delta") {
         markVisible();
         appendTextDelta(evt.delta || "");
@@ -1458,6 +1541,7 @@ async function sendPrompt(text) {
     if (disconnected) markBackendOffline();
   } finally {
     clearInterval(progressInterval);
+    clearStatus(streamStatusToken);
     state.streaming = false;
     state.abortController = null;
     state.abortRequested = false;
@@ -1569,6 +1653,7 @@ function toggleInspector(kind) {
   updateInspectorPanel();
 }
 
+$("codexUsage").onclick = () => void updateCodexUsage({ loading: true });
 $("responsesFoldToggle").onclick = toggleAllResponses;
 $("systemToggle").onclick = () => toggleInspector("system");
 $("treeToggle").onclick = () => toggleInspector("tree");
@@ -1580,5 +1665,7 @@ document.addEventListener("click", (ev) => {
 });
 
 setInterval(() => void checkBackend(), BACKEND_CHECK_INTERVAL_MS);
+setInterval(() => void updateCodexUsage(), CODEX_USAGE_INTERVAL_MS);
 
 refresh().catch((err) => { flashStatus(errorMessage(err), "error"); });
+void updateCodexUsage();

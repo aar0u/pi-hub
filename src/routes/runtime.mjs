@@ -1,5 +1,6 @@
 import { mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { readCodexUsage } from "../codex-usage.mjs";
 import { HttpError, readBody, sendJson } from "../http.mjs";
 import { makeRuntime, SessionManager } from "../pi-runtime.mjs";
 import { listCwds } from "../sessions-api.mjs";
@@ -93,6 +94,10 @@ export function registerRuntimeRoutes(apiRoutes, context) {
 
   apiRoutes.set("GET /api/commands", async (_req, res, _url) => {
     sendJson(res, listSlashCommands(context.getRuntime()));
+  });
+
+  apiRoutes.set("GET /api/codex-usage", async (_req, res, _url) => {
+    sendJson(res, await readCodexUsage());
   });
 
   apiRoutes.set("POST /api/cwd", async (req, res, _url) => {

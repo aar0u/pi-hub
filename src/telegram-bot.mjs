@@ -106,13 +106,16 @@ export function startTelegramBot({ token, allowedChatIds = [], taskStore, runner
       return;
     }
 
-    if (isSlashCommand(text)) {
+    if (startsWithSlashCommand(text)) {
       const command = parseTaskManagement(text);
       if (command) {
         await handleTaskCommand(chatId, command);
         return;
       }
-      // Unknown slash commands are pi prompts, e.g. /serenity skill invocations.
+      if (isSlashCommandOnly(text)) {
+        console.log(`telegram ignored unknown slash command chat_id=${chatId} text=${text}`);
+        return;
+      }
     }
 
     if (!runner.isIdle()) {
@@ -203,6 +206,14 @@ export function startTelegramBot({ token, allowedChatIds = [], taskStore, runner
     await poll();
   }
 
+  if (telegramPollingDisabled()) {
+    console.log('telegram polling disabled by TELEGRAM_POLLING=false');
+    return {
+      sendMessage: sendBotMessage,
+      stop: () => { stopped = true; },
+    };
+  }
+
   void init().catch((error) => {
     console.error('telegram bot init failed:', error instanceof Error ? error.message : error);
   });
@@ -210,6 +221,10 @@ export function startTelegramBot({ token, allowedChatIds = [], taskStore, runner
     sendMessage: sendBotMessage,
     stop: () => { stopped = true; },
   };
+}
+
+function telegramPollingDisabled() {
+  return String(process.env.TELEGRAM_POLLING || '').toLowerCase() === 'false';
 }
 
 function escapeText(value) {
@@ -264,7 +279,7 @@ function logIncomingUpdate(update) {
 function logIncomingMessage(message) {
   const chatId = message.chat?.id ?? 'unknown';
   const reasons = [];
-  if (isSlashCommand(message.text)) reasons.push('slash_command');
+  if (startsWithSlashCommand(message.text)) reasons.push('slash_command');
   if (mentionsThisBot(message.text)) reasons.push(`@${botUsername()}`);
   if (repliesToThisBot(message)) reasons.push(`reply_to_@${botUsername()}`);
   console.log(`telegram incoming message chat_id=${chatId} from=${formatUser(message.from)} reason=${reasons.join(',') || 'direct'} text=${message.text}`);
@@ -279,7 +294,7 @@ function prepareMessageForHandling(message) {
   if (message.from?.is_bot) return false;
   const text = message.text?.trim();
   if (!text) return false;
-  if (isSlashCommand(text)) {
+  if (startsWithSlashCommand(text)) {
     if (!commandForThisBot(text, message)) return false;
     message.normalizedText = stripCommandTarget(text);
     return true;
@@ -317,8 +332,12 @@ function commandTarget(text) {
   return match ? (match[1] || '') : null;
 }
 
-function isSlashCommand(text) {
+function startsWithSlashCommand(text) {
   return commandTarget(text) !== null;
+}
+
+function isSlashCommandOnly(text) {
+  return /^\/\w+(?:@\w+)?\s*$/.test(String(text || ''));
 }
 
 function commandForThisBot(text, message) {

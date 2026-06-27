@@ -18,6 +18,14 @@ pnpm build
 pnpm start
 ```
 
+Codex usage CLI:
+
+```bash
+pnpm usage
+```
+
+It reads `~/.pi/agent/auth.json` by default. Override with `PI_AUTH=/path/to/auth.json` if needed.
+
 `pnpm dev` and `pnpm start` load `.env` automatically via Node's native `--env-file-if-exists`, so no `dotenv` package is required. Set `PORT` to override the default `8787`. The server binds to `127.0.0.1` by default. Keep real `.env` files out of git; commit `.env.example` only.
 
 ## Scheduled tasks

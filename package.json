@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "nodemon --watch src --exec \"node --env-file-if-exists=.env src/server.mjs\"",
     "build": "node scripts/check-syntax.mjs && pnpm vendor:check && node scripts/check-markdown-safety.mjs",
     "start": "node --env-file-if-exists=.env src/server.mjs",
+    "usage": "node src/codex-usage.mjs",
     "vendor:update": "node scripts/update-vendor.mjs",
     "vendor:check": "node scripts/check-vendor.mjs"
   },
@@ -17,8 +17,5 @@
   },
   "engines": {
     "node": ">=22.19.0"
-  },
-  "devDependencies": {
-    "nodemon": "3.1.14"
   }
 }
