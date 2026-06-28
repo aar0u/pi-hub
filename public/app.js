@@ -191,7 +191,42 @@ function isNearChatBottom() {
 }
 
 function scrollChatToBottom(force = false) {
-  if (force || state.autoScroll) $("chat").scrollTop = $("chat").scrollHeight;
+  if (!force && !state.autoScroll) return;
+  const chat = $("chat");
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function installChatAutoScrollObserver() {
+  const chat = $("chat");
+  if (!("ResizeObserver" in window) || !("MutationObserver" in window)) return;
+
+  let raf = 0;
+  const observed = new Set();
+  const schedule = () => {
+    if (!state.autoScroll) return;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      if (state.autoScroll) scrollChatToBottom();
+    });
+  };
+
+  const resizeObserver = new ResizeObserver(schedule);
+  const syncObservedChildren = () => {
+    const current = new Set(chat.children);
+    for (const child of observed) {
+      if (current.has(child)) continue;
+      observed.delete(child);
+      resizeObserver.unobserve(child);
+    }
+    for (const child of current) {
+      if (observed.has(child)) continue;
+      observed.add(child);
+      resizeObserver.observe(child);
+    }
+    schedule();
+  };
+  new MutationObserver(syncObservedChildren).observe(chat, { childList: true });
+  syncObservedChildren();
 }
 
 function messageFoldKey(el) {
@@ -215,14 +250,14 @@ function defaultTurnBlockOpen() {
   return false;
 }
 
-function normalizeStreamPhase(phase) {
-  if (phase === "done") return "done";
-  if (phase === "queued") return "queued";
+function normalizePartStatus(status) {
+  if (status === "done" || status === "error") return "done";
+  if (status === "queued" || status === "pending") return "queued";
   return "running";
 }
 
 function defaultStreamPartOpen(part) {
-  return normalizeStreamPhase(part.phase) !== "done";
+  return normalizePartStatus(part.phase) !== "done";
 }
 
 function activityText(label, startedAt = Date.now()) {
@@ -231,7 +266,7 @@ function activityText(label, startedAt = Date.now()) {
 }
 
 function streamPhaseText(part) {
-  const phase = normalizeStreamPhase(part.phase);
+  const phase = normalizePartStatus(part.phase);
   if (phase === "done") return formatDuration((part.endedAt || Date.now()) - (part.startedAt || part.createdAt));
   return activityText(phase, part.startedAt || part.createdAt);
 }
@@ -1327,6 +1362,9 @@ async function sendPrompt(text) {
   const assistant = addMessage({ role: "assistant", text: activityText("sending request", startTime) }, { inspect: false });
   assistant.el.classList.add("streaming-waiting");
   addMessageAction(assistant.el, "assistant", "Inspect stream", null, () => showDebugInspector("Streaming response", { type: "streaming-response", output, streamParts, rawEvents: rawStreamEvents }));
+  const localStreamStatus = document.createElement("span");
+  localStreamStatus.className = "msg-stream-status";
+  messageActions(assistant.el, "assistant").append(localStreamStatus);
   assistant.body.classList.add("turn-body");
   const controller = new AbortController();
   state.abortController = controller;
@@ -1334,17 +1372,21 @@ async function sendPrompt(text) {
   const streamParts = [];
   const rawStreamEvents = [];
   const streamDetails = new Map();
-  const streamToolParts = new Map();
-  let nextStreamPartId = 0;
-  let activeToolPart = null;
+  const streamPartsById = new Map();
+  let activeNonTextPart = null;
   let gotVisibleResponse = false;
   let streamWarningShown = false;
   let latestPromptState = null;
   let waitingLabel = "sending request";
+  let localStreamLabel = "sending request";
   let streamStatusToken = null;
   let lastStreamEventAt = Date.now();
   let lastNonPingEventAt = Date.now();
+  const renderLocalStreamStatus = () => {
+    localStreamStatus.textContent = activityText(localStreamLabel, lastNonPingEventAt);
+  };
   const renderWaitingStatus = () => {
+    renderLocalStreamStatus();
     if (gotVisibleResponse) return;
     const elapsed = formatDuration(Date.now() - startTime);
     const heartbeatStale = Date.now() - lastStreamEventAt >= STREAM_AWARENESS_TIMEOUT_MS;
@@ -1357,66 +1399,106 @@ async function sendPrompt(text) {
       renderWaitingStatus();
       if (idleMs > STREAM_AWARENESS_TIMEOUT_MS && !streamWarningShown) {
         streamWarningShown = true;
-        streamStatusToken = setStatus("Connected, but no visible model/tool update yet.", "warning");
+        const heartbeatStale = Date.now() - lastStreamEventAt >= STREAM_AWARENESS_TIMEOUT_MS;
+        streamStatusToken = heartbeatStale
+          ? setStatus("No stream heartbeat; backend or network may be stuck.", "warning")
+          : setStatus("Connected; waiting for the first visible model/tool update…", "notice", { busy: true });
       }
       return;
     }
-    if (activeToolPart && activeToolPart.phase !== "done") renderAssistant();
+    renderLocalStreamStatus();
+    if (activeNonTextPart && activeNonTextPart.phase !== "done") renderAssistant();
     if (idleMs > STREAM_AWARENESS_TIMEOUT_MS) {
-      streamStatusToken = setStatus("No model/tool updates; backend/tool may be stuck.", "warning");
+      const heartbeatStale = Date.now() - lastStreamEventAt >= STREAM_AWARENESS_TIMEOUT_MS;
+      streamStatusToken = heartbeatStale
+        ? setStatus("No stream heartbeat; backend or network may be stuck.", "warning")
+        : setStatus("Model is still working; stream heartbeat is healthy…", "notice", { busy: true });
     }
   }, 500);
   const finishStreamPart = (part) => {
     if (!part || part.phase === "done") return;
     part.phase = "done";
     part.endedAt = Date.now();
-    if (activeToolPart === part) activeToolPart = null;
+    if (activeNonTextPart === part) activeNonTextPart = null;
   };
-  const appendTextDelta = (delta) => {
-    if (activeToolPart?.type === "thinking") finishStreamPart(activeToolPart);
-    output += delta;
-    let part = streamParts[streamParts.length - 1];
-    if (!part || part.type !== "text") {
-      part = { type: "text", text: "" };
-      streamParts.push(part);
+  const finishOpenStreamParts = () => {
+    for (const part of streamParts) {
+      if (part.type !== "text" && part.phase !== "done") finishStreamPart(part);
     }
-    part.text += delta;
+    activeNonTextPart = null;
   };
-  const streamToolKey = (evt, name, blockType) => {
-    if (evt.toolCallId) return `tool:${evt.toolCallId}`;
-    if (evt.contentIndex !== undefined && evt.contentIndex !== null) return `${blockType}:${evt.contentIndex}`;
-    if (activeToolPart?.type === blockType && activeToolPart.phase !== "done" && (blockType === "thinking" || activeToolPart.name === name)) return activeToolPart.key;
-    nextStreamPartId += 1;
-    return `${blockType}:${name}:${nextStreamPartId}`;
+  const requirePartId = (evt) => {
+    if (evt.partId) return evt.partId;
+    throw new Error(`Malformed stream event: ${evt.type} missing partId`);
   };
-  const appendToolEvent = (evt) => {
-    if (evt.phase === "queued" && !evt.toolName) return;
-    const name = evt.toolName || activeToolPart?.name || "tool";
-    const blockType = name === "thinking" ? "thinking" : "tool";
-    if (activeToolPart?.type === "thinking" && blockType !== "thinking") finishStreamPart(activeToolPart);
-    const key = streamToolKey(evt, name, blockType);
-    let part = streamToolParts.get(key);
-    if (!part) {
-      part = { key, type: blockType, name, phase: normalizeStreamPhase(evt.phase), createdAt: Date.now(), startedAt: null, endedAt: null, command: "", preview: "", messages: [], error: false };
-      streamToolParts.set(key, part);
-      streamParts.push(part);
+  const startStreamPart = (evt) => {
+    const key = requirePartId(evt);
+    if (streamPartsById.has(key)) throw new Error(`Malformed stream event: duplicate part_start ${key}`);
+    const kind = evt.kind;
+    if (!kind) throw new Error(`Malformed stream event: part_start ${key} missing kind`);
+    const part = kind === "text"
+      ? { key, type: "text", text: "" }
+      : { key, type: kind, name: evt.title || (kind === "thinking" ? "thinking" : "tool"), phase: normalizePartStatus(evt.status), createdAt: Date.now(), startedAt: null, endedAt: null, command: evt.message || evt.preview || evt.title || "", preview: evt.preview || "", messages: [], error: false };
+    streamPartsById.set(key, part);
+    streamParts.push(part);
+    return part;
+  };
+  const existingStreamPart = (evt) => {
+    const key = requirePartId(evt);
+    const part = streamPartsById.get(key);
+    if (!part) throw new Error(`Malformed stream event: ${evt.type} before part_start ${key}`);
+    return part;
+  };
+  const updateActivePart = (part) => {
+    activeNonTextPart = part?.type !== "text" && part.phase !== "done"
+      ? part
+      : [...streamParts].reverse().find((p) => p.type !== "text" && p.phase !== "done") || null;
+  };
+  const appendPartEvent = (evt) => {
+    const part = evt.type === "part_start" ? startStreamPart(evt) : existingStreamPart(evt);
+    if (evt.type === "part_start") {
+      if (part.type !== "text") {
+        part.phase = normalizePartStatus(evt.status || part.phase || "running");
+        if (part.phase === "running" && !part.startedAt) part.startedAt = Date.now();
+      }
+      updateActivePart(part);
+      return part;
     }
-    part.name = name;
-    if (evt.phase !== "update") part.phase = normalizeStreamPhase(evt.phase || part.phase || "running");
-    if (["queued", "running"].includes(part.phase) && evt.phase === "update") part.phase = "running";
+    if (evt.type === "part_delta") {
+      if (part.type === "text") {
+        output += evt.delta || "";
+        part.text += evt.delta || "";
+      } else if (part.type === "thinking") {
+        part.messages[0] = `${part.messages[0] || ""}${evt.delta || ""}`;
+        part.command = thinkingPreview(part.messages[0]) || part.command;
+      } else if (evt.delta) {
+        part.messages[0] = `${part.messages[0] || ""}${evt.delta}`;
+      }
+      updateActivePart(part);
+      return part;
+    }
+    if (evt.title) part.name = evt.title;
+    if (evt.status) part.phase = normalizePartStatus(evt.status);
     if (part.phase === "running" && !part.startedAt) part.startedAt = Date.now();
-    if (part.phase === "done" && !part.endedAt) part.endedAt = Date.now();
-    part.error = Boolean(evt.isError || part.error);
-    const eventText = evt.preview ?? evt.message;
-    if (eventText) {
-      if (evt.phase === "queued" || evt.phase === "running") {
-        part.command = eventText;
-        part.preview = eventText;
-      } else if (part.type === "thinking") part.messages[0] = `${part.messages[0] || ""}${eventText}`;
-      else part.messages.push(eventText);
-      if (part.type === "thinking") part.command = thinkingPreview(part.messages[0] || "") || part.command;
+    if (evt.preview !== undefined) part.preview = evt.preview || "";
+    if (evt.message && part.phase !== "done") part.command = evt.message;
+    if (evt.type === "part_update" && part.type === "tool" && "result" in evt) {
+      part.messages = [evt.result === "" ? "(no output)" : (evt.result ?? "(no output)")];
     }
-    activeToolPart = part.phase === "done" ? [...streamParts].reverse().find((p) => p.type !== "text" && p.phase !== "done") || null : part;
+    if (evt.type === "part_end") {
+      part.phase = normalizePartStatus(evt.status || "done");
+      part.endedAt = Date.now();
+      part.error = Boolean(evt.isError || evt.status === "error" || part.error);
+      if (part.type === "text" && evt.content !== undefined) part.text = evt.content || "";
+      else if (part.type === "thinking" && evt.content !== undefined) {
+        part.messages[0] = evt.content || "";
+        part.command = thinkingPreview(part.messages[0]) || part.command;
+      } else if (part.type === "tool" && ("result" in evt || "message" in evt)) {
+        part.messages = [evt.result === "" ? "(no output)" : (evt.result ?? evt.message ?? "(no output)")];
+      }
+    }
+    updateActivePart(part);
+    return part;
   };
   const renderAssistant = () => {
     assistant.body.textContent = "";
@@ -1459,7 +1541,15 @@ async function sendPrompt(text) {
       tool.append(summary, content);
       assistant.body.append(tool);
     }
-    if (!assistant.body.childElementCount) assistant.body.textContent = activeToolPart ? "working…" : "waiting…";
+    if (!assistant.body.childElementCount) assistant.body.textContent = activeNonTextPart ? "working…" : "waiting…";
+  };
+  const appendStreamError = (message) => {
+    renderAssistant();
+    if (!streamParts.length) assistant.body.textContent = "";
+    const error = document.createElement("div");
+    error.className = "turn-stream-error";
+    error.textContent = message;
+    assistant.body.append(error);
   };
   const markVisible = () => {
     if (gotVisibleResponse) return;
@@ -1486,41 +1576,42 @@ async function sendPrompt(text) {
       lastNonPingEventAt = Date.now();
       if (evt.type === "accepted") {
         waitingLabel = "backend accepted, waiting for model";
-        streamStatusToken = setStatus("Request accepted; waiting for model/tool updates…", "notice", { busy: true });
+        localStreamLabel = "waiting for model";
+        clearStatus(streamStatusToken);
         renderWaitingStatus();
         return;
       }
-      if (evt.type === "message_start") {
+      if (evt.type === "response_start") {
         waitingLabel = "model response started";
-        streamStatusToken = setStatus("Model response started…", "notice", { busy: true });
+        localStreamLabel = "responding";
+        clearStatus(streamStatusToken);
         renderWaitingStatus();
         return;
       }
-      if (evt.type === "delta") {
+      if (evt.type === "part_start" || evt.type === "part_delta" || evt.type === "part_update" || evt.type === "part_end") {
         markVisible();
-        appendTextDelta(evt.delta || "");
+        const part = appendPartEvent(evt);
+        localStreamLabel = part?.type === "tool" ? "working" : part?.type === "thinking" ? "thinking" : "responding";
+        renderLocalStreamStatus();
         renderAssistant();
       }
-      if (evt.type === "tool") {
+      if (evt.type === "response_error") {
         markVisible();
-        appendToolEvent(evt);
-        renderAssistant();
-      }
-      if (evt.type === "error") {
-        markVisible();
+        finishOpenStreamParts();
+        localStreamStatus.textContent = "error";
         assistant.el.classList.add("error");
-        assistant.body.textContent = evt.message || "Unknown error";
-        setHeaderDetail(assistant.head, assistant.body.textContent);
+        const message = evt.message || "Unknown error";
+        appendStreamError(message);
+        setHeaderDetail(assistant.head, message);
         if (evt.state) {
           latestPromptState = evt.state;
           state.data = evt.state;
         }
       }
-      if (evt.type === "done" || evt.type === "state") {
-        if (activeToolPart && activeToolPart.phase !== "done") {
-          finishStreamPart(activeToolPart);
-          renderAssistant();
-        }
+      if (evt.type === "response_end") {
+        finishOpenStreamParts();
+        localStreamStatus.textContent = "done";
+        renderAssistant();
         if (evt.state) {
           latestPromptState = evt.state;
           state.data = evt.state;
@@ -1529,15 +1620,19 @@ async function sendPrompt(text) {
       scrollChatToBottom();
     });
     if (!gotVisibleResponse && !output) {
+      localStreamStatus.textContent = "error";
       assistant.el.classList.add("error");
       assistant.body.textContent = "No response content received.";
       setHeaderDetail(assistant.head, assistant.body.textContent);
     }
   } catch (err) {
+    localStreamStatus.textContent = state.abortRequested ? "aborted" : "error";
     assistant.el.classList.add("error");
+    finishOpenStreamParts();
     const disconnected = !state.abortRequested && isNetworkError(err);
-    assistant.body.textContent = state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err));
-    setHeaderDetail(assistant.head, assistant.body.textContent);
+    const message = state.abortRequested ? "Request aborted." : (disconnected ? BACKEND_OFFLINE_MESSAGE : errorMessage(err));
+    appendStreamError(message);
+    setHeaderDetail(assistant.head, message);
     if (disconnected) markBackendOffline();
   } finally {
     clearInterval(progressInterval);
@@ -1556,6 +1651,7 @@ async function sendPrompt(text) {
 }
 
 installComposerResize();
+installChatAutoScrollObserver();
 
 $("chat").addEventListener("scroll", () => {
   state.autoScroll = isNearChatBottom();

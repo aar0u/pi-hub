@@ -528,7 +528,7 @@ async function handlePrompt(req, res) {
     void activeSession.abort().catch(() => {});
   });
 
-  const unsubscribe = subscribePromptEvents(activeSession, res, () => sessionPayload(activeRuntime), logEvent);
+  const unsubscribe = subscribePromptEvents(activeSession, res, logEvent);
   logEvent("prompt", "start web");
   try {
     writeNdjson(res, { type: "accepted" });
@@ -536,10 +536,12 @@ async function handlePrompt(req, res) {
     const state = sessionPayload(activeRuntime);
     logLargeTokenUsage("web", state);
     logEvent("prompt", "done web");
-    writeNdjson(res, { type: "done", state });
+    unsubscribe.closeOpenParts?.("done");
+    writeNdjson(res, { type: "response_end", state });
   } catch (error) {
     logEvent("prompt", `error web: ${error instanceof Error ? error.message : String(error)}`);
-    writeNdjson(res, { type: "error", message: error instanceof Error ? error.message : String(error), state: sessionPayload(activeRuntime) });
+    unsubscribe.closeOpenParts?.("error");
+    writeNdjson(res, { type: "response_error", message: error instanceof Error ? error.message : String(error), state: sessionPayload(activeRuntime) });
   } finally {
     completed = true;
     clearActivePrompt(activeSession);

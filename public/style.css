@@ -122,6 +122,7 @@ main { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr
 .msg-actions.assistant-actions { align-self: flex-start; }
 .msg-action { border: 0; background: transparent; width: auto; height: 22px; padding: 0 3px; display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: inherit; }
 .msg-action:hover { background: transparent; color: #8f6527; }
+.msg-stream-status { display: inline-flex; align-items: center; height: 22px; padding: 0 3px; color: #9b8d7b; }
 .msg-time { margin-left: 2px; align-self: center; color: #a99c8b; font-variant-numeric: tabular-nums; }
 .collapse-indicator { color: #8a7d6d; display: inline-grid; place-items: center; }
 .turn-status { align-self: flex-start; max-width: 980px; margin-top: -10px; padding: 0 8px; font-size: 11px; color: #8a7d6d; white-space: nowrap; }
@@ -147,6 +148,7 @@ main { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr
 .turn-tool, .turn-thinking { border: 1px solid #eee5d8; border-radius: 10px; background: #faf7f0; padding: 7px 9px; color: #6f6558; }
 .turn-thinking { background: #f7f4ee; color: #7a7065; }
 .turn-tool.error, .turn-thinking.error { border-color: #d29288; background: #fff7f5; }
+.turn-stream-error { border: 1px solid #d29288; border-radius: 10px; background: #fff7f5; padding: 7px 9px; color: #8f3f35; white-space: pre-wrap; }
 .turn-tool summary, .turn-thinking summary { cursor: pointer; font-size: 12px; font-weight: 650; display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .tool-inspect { margin-left: auto; flex: 0 0 auto; border: 0; background: transparent; padding: 0 3px; color: #8a7d6d; font-size: 11px; font-weight: 400; }
 .tool-inspect:hover { background: transparent; color: #8f6527; }
